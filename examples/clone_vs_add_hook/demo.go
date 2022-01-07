@@ -11,8 +11,10 @@ func demoClone() error {
 	// Clone kprobe/vfs_open program, edit its constant and load a new probe. This will essentially create a new program
 	// and you should see a new line in /sys/kernel/debug/tracing/kprobe_events.
 	newProbe := manager.Probe{
-		UID:     "MySeconHook",
-		Section: "kprobe/vfs_mkdir",
+		UID:              "MySeconHook",
+		Section:          "kprobe/vfs_mkdir",
+		EbpfFuncName:     "kprobe_vfs_mkdir",
+		AttachToFuncName: "vfs_mkdir",
 	}
 
 	mkdirCloneEditors := []manager.ConstantEditor{
@@ -38,8 +40,10 @@ func demoAddHook() error {
 	// Add a new hook point to the kprobe/vfs_mkdir program. The program was initially loaded but not attached. This will
 	// not create a copy of the program, it will just add a new hook point. This can be donne multiple times.
 	firstRmdir := manager.Probe{
-		UID:     "FirstRmdir",
-		Section: "kprobe/vfs_rmdir",
+		UID:              "FirstRmdir",
+		Section:          "kprobe/vfs_rmdir",
+		AttachToFuncName: "vfs_rmdir",
+		EbpfFuncName:     "kprobe_vfs_rmdir",
 	}
 	err := m.AddHook("", firstRmdir)
 	if err != nil {
@@ -47,8 +51,10 @@ func demoAddHook() error {
 	}
 
 	secondRmdir := manager.Probe{
-		UID:     "SecondRmdir",
-		Section: "kprobe/vfs_rmdir",
+		UID:              "SecondRmdir",
+		Section:          "kprobe/vfs_rmdir",
+		AttachToFuncName: "vfs_rmdir",
+		EbpfFuncName:     "kprobe_vfs_rmdir",
 	}
 	err = m.AddHook("", secondRmdir)
 	if err != nil {

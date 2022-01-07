@@ -98,7 +98,7 @@ func loadNewMap(spec ebpf.MapSpec, options MapOptions) (*Map, error) {
 	// Pin map if need be
 	if managerMap.PinPath != "" {
 		if err := managerMap.array.Pin(managerMap.PinPath); err != nil {
-			return nil, errors.New(fmt.Sprintf("error:%v , couldn't pin map %s at %s", err , managerMap.Name, managerMap.PinPath))
+			return nil, errors.New(fmt.Sprintf("error:%v , couldn't pin map %s at %s", err, managerMap.Name, managerMap.PinPath))
 		}
 	}
 	return &managerMap, nil
@@ -123,7 +123,7 @@ func (m *Map) Init(manager *Manager) error {
 		// Pin map if needed
 		if m.PinPath != "" {
 			if err := m.array.Pin(m.PinPath); err != nil {
-				return errors.New(fmt.Sprintf("error:%v , couldn't pin map %s at %s", err , m.Name, m.PinPath))
+				return errors.New(fmt.Sprintf("error:%v , couldn't pin map %s at %s", err, m.Name, m.PinPath))
 			}
 		}
 	}

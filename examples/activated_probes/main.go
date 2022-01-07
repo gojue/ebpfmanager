@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"time"
 
 	"github.com/sirupsen/logrus"
 
@@ -13,20 +14,20 @@ import (
 var m1 = &manager.Manager{
 	Probes: []*manager.Probe{
 		{
-			UID:            "MyVFSMkdir1",
-			Section:        "kprobe/vfs_mkdir",
-			KernelFuncName: "kprobe_vfs_mkdir",
-			HookFuncName: "vfs_mkdir",
+			UID:              "MyVFSMkdir1",
+			Section:          "kprobe/vfs_mkdir",
+			EbpfFuncName:     "kprobe_vfs_mkdir",
+			AttachToFuncName: "vfs_mkdir",
 		},
 		{
-			Section:        "kprobe/vfs_opennnnnn",
-			KernelFuncName: "kprobe_open",
-			HookFuncName:   "open",
+			Section:          "kprobe/vfs_opennnnnn",
+			EbpfFuncName:     "kprobe_open",
+			AttachToFuncName: "open",
 		},
 		{
-			Section:        "kprobe/exclude",
-			KernelFuncName: "kprobe_exclude",
-			HookFuncName: "exclude",
+			Section:          "kprobe/exclude",
+			EbpfFuncName:     "kprobe_exclude",
+			AttachToFuncName: "exclude",
 		},
 	},
 }
@@ -85,20 +86,20 @@ var options1 = manager.Options{
 var m2 = &manager.Manager{
 	Probes: []*manager.Probe{
 		{
-			UID:            "MyVFSMkdir2",
-			Section:        "kprobe/vfs_mkdir",
-			KernelFuncName: "kprobe_vfs_mkdir",
-			HookFuncName:   "vfs_mkdir",
+			UID:              "MyVFSMkdir2",
+			Section:          "kprobe/vfs_mkdir",
+			EbpfFuncName:     "kprobe_vfs_mkdir",
+			AttachToFuncName: "vfs_mkdir",
 		},
 		{
-			Section:        "kprobe/vfs_opennnnnn",
-			KernelFuncName: "kprobe_open",
-			HookFuncName:   "open",
+			Section:          "kprobe/vfs_opennnnnn",
+			EbpfFuncName:     "kprobe_open",
+			AttachToFuncName: "open",
 		},
 		{
-			Section:        "kprobe/exclude",
-			KernelFuncName: "kprobe_exclude",
-			HookFuncName:   "exclude",
+			Section:          "kprobe/exclude",
+			EbpfFuncName:     "kprobe_exclude",
+			AttachToFuncName: "exclude",
 		},
 	},
 }
@@ -143,20 +144,20 @@ var options2 = manager.Options{
 var m3 = &manager.Manager{
 	Probes: []*manager.Probe{
 		{
-			UID:            "MyVFSMkdir2",
-			Section:        "kprobe/vfs_mkdir",
-			KernelFuncName: "kprobe_vfs_mkdir",
-			HookFuncName: "vfs_mkdir",
+			UID:              "MyVFSMkdir2",
+			Section:          "kprobe/vfs_mkdir",
+			EbpfFuncName:     "kprobe_vfs_mkdir",
+			AttachToFuncName: "vfs_mkdir",
 		},
 		{
-			Section:        "kprobe/vfs_opennnnnn",
-			KernelFuncName: "kprobe_open",
-			HookFuncName:   "open",
+			Section:          "kprobe/vfs_opennnnnn",
+			EbpfFuncName:     "kprobe_open",
+			AttachToFuncName: "open",
 		},
 		{
-			Section:        "kprobe/exclude",
-			KernelFuncName: "kprobe_exclude",
-			HookFuncName:   "exclude_from_core",
+			Section:          "kprobe/exclude",
+			EbpfFuncName:     "kprobe_exclude",
+			AttachToFuncName: "ext4_fc_replay_check_excluded",
 		},
 	},
 }
@@ -223,7 +224,7 @@ func main() {
 		logrus.Error(err)
 	}
 
-	vfsOpenID := manager.ProbeIdentificationPair{EbpfFuncName: "kprobe_vfs_open"}
+	vfsOpenID := manager.ProbeIdentificationPair{EbpfFuncName: "kprobe_open"}
 	vfsOpenProbe, ok := m3.GetProbe(vfsOpenID)
 	if !ok {
 		logrus.Fatal("Failed to find kprobe/vfs_opennnnnn")
@@ -236,6 +237,9 @@ func main() {
 
 // wait - Waits until an interrupt or kill signal is sent
 func wait() {
+	logrus.Printf("run next testcase after %d second ", 3)
+	time.Sleep(time.Second * 3)
+	return
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, os.Kill)
 	<-sig

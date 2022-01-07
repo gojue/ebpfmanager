@@ -8,10 +8,11 @@ import (
 
 var m = &manager.Manager{
 	Probes: []*manager.Probe{
-		&manager.Probe{
+		{
 			Section:          "classifier/one",
-			Ifname:           "enp0s3", // change this to the interface index connected to the internet
+			Ifname:           "ens33", // change this to the interface index connected to the internet
 			NetworkDirection: manager.Egress,
+			EbpfFuncName:     "classifier_one",
 		},
 	},
 }
@@ -22,9 +23,12 @@ var m2 = &manager.Manager{
 
 func main() {
 	// Initialize the manager
+	logrus.Println("ready to init probe1.o")
 	if err := m.Init(recoverAssets("/probe1.o")); err != nil {
 		logrus.Fatal(err)
 	}
+
+	logrus.Println("ready to init probe2.o")
 	if err := m2.Init(recoverAssets("/probe2.o")); err != nil {
 		logrus.Fatal(err)
 	}

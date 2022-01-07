@@ -1,17 +1,17 @@
 package main
 
 import (
-	"github.com/sirupsen/logrus"
-
 	"github.com/ehids/ebpfmanager"
+	"github.com/sirupsen/logrus"
 )
 
 var m = &manager.Manager{
 	Probes: []*manager.Probe{
-		&manager.Probe{
-			Section:        "uprobe/readline",
-			KernelFuncName: "uprobe_readline",
-			BinaryPath:     "/usr/bin/bash",
+		{
+			Section:          "uprobe/readline",
+			EbpfFuncName:     "uprobe_readline",
+			AttachToFuncName: "readline",
+			BinaryPath:       "/usr/bin/bash",
 		},
 	},
 }

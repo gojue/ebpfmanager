@@ -9,27 +9,31 @@ import (
 
 var m = &manager.Manager{
 	Probes: []*manager.Probe{
-		&manager.Probe{
-			Section:      "kprobe/mkdirat",
-			PinPath:      "/sys/fs/bpf/mkdirat",
-			HookFuncName: "mkdirat",
+		{
+			Section:          "kprobe/mkdirat",
+			PinPath:          "/sys/fs/bpf/mkdirat",
+			AttachToFuncName: "mkdirat",
+			EbpfFuncName:     "kprobe_mkdirat",
 		},
-		&manager.Probe{
-			Section:      "kretprobe/mkdirat",
-			HookFuncName: "mkdirat",
+		{
+			Section:          "kretprobe/mkdirat",
+			AttachToFuncName: "mkdirat",
+			EbpfFuncName:     "kretprobe_mkdirat",
 		},
-		&manager.Probe{
-			Section:      "kprobe/mkdir",
-			PinPath:      "/sys/fs/bpf/mkdir",
-			HookFuncName: "mkdir",
+		{
+			Section:          "kprobe/mkdir",
+			PinPath:          "/sys/fs/bpf/mkdir",
+			AttachToFuncName: "mkdir",
+			EbpfFuncName:     "kprobe_mkdir",
 		},
-		&manager.Probe{
-			Section:      "kretprobe/mkdir",
-			HookFuncName: "mkdir",
+		{
+			Section:          "kretprobe/mkdir",
+			AttachToFuncName: "mkdir",
+			EbpfFuncName:     "kretprobe_mkdir",
 		},
 	},
 	Maps: []*manager.Map{
-		&manager.Map{
+		{
 			Name: "map1",
 			MapOptions: manager.MapOptions{
 				PinPath: "/sys/fs/bpf/map1",
@@ -74,4 +78,3 @@ func main() {
 		logrus.Fatal(err)
 	}
 }
-

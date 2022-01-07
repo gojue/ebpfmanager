@@ -8,8 +8,9 @@ import (
 
 var m = &manager.Manager{
 	Probes: []*manager.Probe{
-		&manager.Probe{
-			Section: "socket/sock_filter",
+		{
+			Section:      "socket/sock_filter",
+			EbpfFuncName: "socket_sock_filter",
 		},
 	},
 }
@@ -46,4 +47,3 @@ func main() {
 		logrus.Fatal(err)
 	}
 }
-

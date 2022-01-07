@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"time"
 
 	"github.com/sirupsen/logrus"
 )
@@ -21,6 +22,9 @@ func recoverAssets() io.ReaderAt {
 
 // wait - Waits until an interrupt or kill signal is sent
 func wait() {
+	logrus.Println("run next testcase after 3 second")
+	time.Sleep(time.Second * 3)
+	return
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, os.Kill)
 	<-sig

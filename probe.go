@@ -95,13 +95,13 @@ type Probe struct {
 	// CopyProgram - When enabled, this option will make a unique copy of the program section for the current program
 	CopyProgram bool
 
-	// HookFuncName - Name of the syscall on which the program should be hooked. As the exact kernel symbol may
+	// EbpfFuncName - Name of the syscall on which the program should be hooked. As the exact kernel symbol may
 	// differ from one kernel version to the other, the right prefix will be computed automatically at runtime.
 	// If a syscall name is not provided, the section name (without its probe type prefix) is assumed to be the
 	// hook point.
-	HookFuncName string
+	EbpfFuncName string
 
-	// KernelFuncName - Pattern used to find the function(s) to attach to
+	// AttachToFuncName - Pattern used to find the function(s) to attach to
 	// FOR KPROBES: When this option is activated, the provided pattern is matched against the list of available symbols
 	// in /sys/kernel/debug/tracing/available_filter_functions. If the exact function does not exist, then the first
 	// symbol matching the provided pattern will be used. This option requires debugfs.
@@ -109,7 +109,7 @@ type Probe struct {
 	// FOR UPROBES: When this option is activated, the provided pattern is matched the list of symbols in the symbol
 	// table of the provided elf binary. If the exact function does not exist, then the first symbol matching the
 	// provided pattern will be used.
-	KernelFuncName string
+	AttachToFuncName string
 
 	// Enabled - Indicates if a probe should be enabled or not. This parameter can be set at runtime using the
 	// Manager options (see ActivatedProbes)
@@ -173,24 +173,44 @@ type Probe struct {
 // Copy - Returns a copy of the current probe instance. Only the exported fields are copied.
 func (p *Probe) Copy() *Probe {
 	return &Probe{
-		UID:             p.UID,
-		Section:         p.Section,
-		HookFuncName:    p.HookFuncName,
-		KernelFuncName:  p.KernelFuncName,
-		Enabled:         p.Enabled,
-		PinPath:         p.PinPath,
-		KProbeMaxActive: p.KProbeMaxActive,
-		BinaryPath:      p.BinaryPath,
-		CGroupPath:      p.CGroupPath,
-		SocketFD:        p.SocketFD,
-		Ifindex:         p.Ifindex,
-		Ifname:          p.Ifname,
-		IfindexNetns:    p.IfindexNetns,
-		XDPAttachMode:   p.XDPAttachMode,
+		UID:              p.UID,
+		Section:          p.Section,
+		AttachToFuncName: p.AttachToFuncName,
+		EbpfFuncName:     p.EbpfFuncName,
+		Enabled:          p.Enabled,
+		PinPath:          p.PinPath,
+		KProbeMaxActive:  p.KProbeMaxActive,
+		BinaryPath:       p.BinaryPath,
+		CGroupPath:       p.CGroupPath,
+		SocketFD:         p.SocketFD,
+		Ifindex:          p.Ifindex,
+		Ifname:           p.Ifname,
+		IfindexNetns:     p.IfindexNetns,
+		XDPAttachMode:    p.XDPAttachMode,
 		NetworkDirection: p.NetworkDirection,
 		ProbeRetry:       p.ProbeRetry,
 		ProbeRetryDelay:  p.ProbeRetryDelay,
 	}
+}
+
+// checkField - Returns the last error that the probe encountered
+func (p *Probe) checkField() error {
+	if p.EbpfFuncName == "" || p.Section == "" {
+		return errors.New(fmt.Sprintf("EbpfFuncName:%s, Section:%s cant be null.", p.EbpfFuncName, p.Section))
+	}
+
+	//regex match 如果不是kprobe或uprobe，则直接允许为空
+	regexStr := `([ku](ret)?probe/)`
+	fnRegex := regexp.MustCompile(regexStr)
+	match := fnRegex.FindAllString(p.Section, -1)
+	if len(match) <= 0 {
+		return nil
+	}
+
+	if p.AttachToFuncName == "" {
+		return errors.New(fmt.Sprintf("AttachToFuncName:%s cant be null.", p.AttachToFuncName))
+	}
+	return nil
 }
 
 // GetLastError - Returns the last error that the probe encountered
@@ -205,7 +225,7 @@ func (p *Probe) IdentificationPairMatches(id ProbeIdentificationPair) bool {
 
 // GetIdentificationPair - Returns the identification pair (probe section, probe UID)
 func (p *Probe) GetIdentificationPair() ProbeIdentificationPair {
-	return ProbeIdentificationPair{p.UID, p.KernelFuncName}
+	return ProbeIdentificationPair{p.UID, p.EbpfFuncName}
 }
 
 // IsRunning - Returns true if the probe was successfully initialized, started and is currently running.
@@ -268,8 +288,9 @@ func (p *Probe) Program() *ebpf.Program {
 
 // init - Internal initialization function
 func (p *Probe) init() error {
-	if p.KernelFuncName == "" || p.Section == "" || p.HookFuncName == "" {
-		return errors.New("EbpfFuncName/Section/HookFuncName cant be null")
+	err := p.checkField()
+	if err != nil {
+		return err
 	}
 
 	// Load spec if necessary
@@ -283,7 +304,7 @@ func (p *Probe) init() error {
 	}
 
 	// override matchFuncName based on the CopyProgram parameter
-	matchFuncName := p.KernelFuncName
+	matchFuncName := p.EbpfFuncName
 	if p.CopyProgram {
 		matchFuncName += p.UID
 	}
@@ -329,13 +350,9 @@ func (p *Probe) init() error {
 	}
 
 	if kProbe {
-		p.funcName = p.HookFuncName
-
-	}
-	// Update syscall function name with the correct arch prefix
-	if p.HookFuncName != "" {
+		// Update syscall function name with the correct arch prefix
 		var err error
-		p.funcName, err = GetSyscallFnNameWithSymFile(p.HookFuncName, p.manager.options.SymFile)
+		p.funcName, err = GetSyscallFnNameWithSymFile(p.AttachToFuncName, p.manager.options.SymFile)
 		if err != nil {
 			p.lastError = err
 			return err
@@ -433,7 +450,7 @@ func (p *Probe) attach() error {
 		p.lastError = err
 		// Clean up any progress made in the attach attempt
 		_ = p.stop(false)
-		return errors.New(fmt.Sprintf("error:%v , couldn't start probe %s", err, p.KernelFuncName))
+		return errors.New(fmt.Sprintf("error:%v , couldn't start probe %s", err, p.EbpfFuncName))
 	}
 
 	// update probe state
@@ -532,7 +549,7 @@ func (p *Probe) stop(saveStopError bool) error {
 		}
 		return nil
 	}
-	return errors.New(fmt.Sprintf("error:%v , couldn't stop probe %s", err, p.KernelFuncName))
+	return errors.New(fmt.Sprintf("error:%v , couldn't stop probe %s", err, p.EbpfFuncName))
 }
 
 // reset - Cleans up the internal fields of the probe
@@ -557,14 +574,9 @@ func (p *Probe) attachKprobe() error {
 	funcName := p.funcName
 	isRet := false
 	if strings.HasPrefix(p.Section, "kretprobe/") {
-		if funcName == "" {
-			funcName = strings.TrimPrefix(p.Section, "kretprobe/")
-		}
 		isRet = true
 	} else if strings.HasPrefix(p.Section, "kprobe/") {
-		if funcName == "" {
-			funcName = strings.TrimPrefix(p.Section, "kprobe/")
-		}
+		isRet = false
 	} else {
 		// this might actually be a Uprobe
 		return p.attachUprobe()
@@ -597,7 +609,7 @@ func (p *Probe) attachTracepoint() error {
 
 	kp, err := link.Tracepoint(category, name, p.program)
 	if err != nil {
-		return errors.New(fmt.Sprintf("error:%v , couldn's activate tracepoint %s, matchFuncName:%s", err, p.Section, p.KernelFuncName))
+		return errors.New(fmt.Sprintf("error:%v , couldn's activate tracepoint %s, matchFuncName:%s", err, p.Section, p.EbpfFuncName))
 	}
 	p.link = kp
 	return nil
@@ -607,13 +619,13 @@ func (p *Probe) attachTracepoint() error {
 func (p *Probe) attachUprobe() error {
 	p.attachPID = os.Getpid()
 	// Prepare uprobe_events line parameters
-	var funcName string
+	//var funcName string
 	var isRet bool
 	if strings.HasPrefix(p.Section, "uretprobe/") {
-		funcName = strings.TrimPrefix(p.Section, "uretprobe/")
+		//funcName = strings.TrimPrefix(p.Section, "uretprobe/")
 		isRet = true
 	} else if strings.HasPrefix(p.Section, "uprobe/") {
-		funcName = strings.TrimPrefix(p.Section, "uprobe/")
+		//funcName = strings.TrimPrefix(p.Section, "uprobe/")
 	} else {
 		// unknown type
 		return fmt.Errorf("error:%v, program type unrecognized in section %v", ErrSectionFormat, p.Section)
@@ -621,28 +633,28 @@ func (p *Probe) attachUprobe() error {
 
 	// compute the offset if it was not provided
 	if p.UprobeOffset == 0 {
-		if len(p.HookFuncName) <= 0 {
-			// find the offset of the first symbol matching the provided pattern
-			funcName = fmt.Sprintf("^%s$", funcName)
-			pattern, err := regexp.Compile(funcName)
-			if err != nil {
-				return errors.New(fmt.Sprintf("error:%v , failed to compile pattern %s", err, funcName))
-			}
-
-			// Retrieve dynamic symbol offset
-			offsets, err := FindSymbolOffsets(p.BinaryPath, pattern)
-			if err != nil {
-				return errors.New(fmt.Sprintf("error:%v , couldn't find symbol matching %s in %s", err, pattern.String(), p.BinaryPath))
-			}
-			p.UprobeOffset = offsets[0].Value
-			p.funcName = offsets[0].Name
-		}
-		p.funcName = p.HookFuncName
+		p.funcName = p.AttachToFuncName
+		//if len(p.AttachToFuncName) <= 0 {
+		//	// find the offset of the first symbol matching the provided pattern
+		//	funcName = fmt.Sprintf("^%s$", funcName)
+		//	pattern, err := regexp.Compile(funcName)
+		//	if err != nil {
+		//		return errors.New(fmt.Sprintf("error:%v , failed to compile pattern %s", err, funcName))
+		//	}
+		//
+		//	// Retrieve dynamic symbol offset
+		//	offsets, err := FindSymbolOffsets(p.BinaryPath, pattern)
+		//	if err != nil {
+		//		return errors.New(fmt.Sprintf("error:%v , couldn't find symbol matching %s in %s", err, pattern.String(), p.BinaryPath))
+		//	}
+		//	p.UprobeOffset = offsets[0].Value
+		//	p.funcName = offsets[0].Name
+		//}
 	}
 
 	ex, err := link.OpenExecutable(p.BinaryPath)
 	if err != nil {
-		return errors.New(fmt.Sprintf("error:%v , couldn't enable uprobe %s", err, p.KernelFuncName))
+		return errors.New(fmt.Sprintf("error:%v , couldn't enable uprobe %s", err, p.EbpfFuncName))
 	}
 	opts := &link.UprobeOptions{
 		Offset: p.UprobeOffset,
@@ -754,6 +766,7 @@ func (p *Probe) attachTCCLS() error {
 	if err == nil {
 		p.tcObject = qdisc
 		ntl.schedClsCount += 1
+		return nil
 	}
 	return errors.New(fmt.Sprintf("error:%v , couldn't add a %v filter to interface %v: %v", err, p.NetworkDirection, p.Ifindex, err))
 }
@@ -774,6 +787,9 @@ func (p *Probe) detachTCCLS() error {
 
 	// Delete qdisc
 	err := ntl.rtNetlink.Qdisc().Delete(p.tcObject)
+	if err == nil {
+		return nil
+	}
 	return errors.New(fmt.Sprintf("error:%v , couldn't detach TC classifier of probe %v", err, p.GetIdentificationPair()))
 }
 
@@ -787,6 +803,9 @@ func (p *Probe) attachXDP() error {
 
 	// Attach program
 	err = netlink.LinkSetXdpFdWithFlags(nlink, p.program.FD(), int(p.XDPAttachMode))
+	if err == nil {
+		return nil
+	}
 	return errors.New(fmt.Sprintf("error:%v , couldn't attach XDP program %v to interface %v", err, p.GetIdentificationPair(), p.Ifindex))
 }
 
@@ -800,5 +819,8 @@ func (p *Probe) detachXDP() error {
 
 	// Detach program
 	err = netlink.LinkSetXdpFdWithFlags(nlink, -1, int(p.XDPAttachMode))
+	if err == nil {
+		return nil
+	}
 	return errors.New(fmt.Sprintf("error:%v , couldn't detach XDP program %v from interface %v", err, p.GetIdentificationPair(), p.Ifindex))
 }

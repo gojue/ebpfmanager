@@ -13,7 +13,7 @@ func demoTailCall() error {
 	trigger()
 	time.Sleep(1 * time.Second)
 
-	prog, _, err := m2.GetProgram(manager.ProbeIdentificationPair{Section: "classifier/three"})
+	prog, _, err := m2.GetProgram(manager.ProbeIdentificationPair{EbpfFuncName: "classifier_three"})
 	if err != nil {
 		logrus.Fatal(err)
 	}
@@ -24,7 +24,7 @@ func demoTailCall() error {
 			ProgArrayName: "tc_prog_array",
 			Key:           uint32(1),
 			ProbeIdentificationPair: manager.ProbeIdentificationPair{
-				Section: "classifier/two",
+				EbpfFuncName: "classifier_two",
 			},
 		},
 		{

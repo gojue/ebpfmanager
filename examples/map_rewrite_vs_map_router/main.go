@@ -7,16 +7,20 @@ import (
 
 var m1 = &manager.Manager{
 	Probes: []*manager.Probe{
-		&manager.Probe{
-			Section: "kretprobe/vfs_mkdir",
+		{
+			Section:          "kretprobe/vfs_mkdir",
+			EbpfFuncName:     "kretprobe_vfs_mkdir",
+			AttachToFuncName: "vfs_mkdir",
 		},
 	},
 }
 
 var m2 = &manager.Manager{
 	Probes: []*manager.Probe{
-		&manager.Probe{
-			Section: "kprobe/vfs_mkdir",
+		{
+			Section:          "kprobe/vfs_mkdir",
+			EbpfFuncName:     "kprobe_vfs_mkdir",
+			AttachToFuncName: "vfs_mkdir",
 		},
 	},
 }
@@ -33,12 +37,12 @@ func main() {
 
 	// Start demos
 	if err := demoMapEditor(); err != nil {
-		cleanup()
 		logrus.Fatal(err)
+		cleanup()
 	}
 	if err := demoMapRouter(); err != nil {
-		cleanup()
 		logrus.Fatal(err)
+		cleanup()
 	}
 
 	// Close the managers

@@ -12,19 +12,20 @@ import (
 var m = &manager.Manager{
 	Probes: []*manager.Probe{
 		&manager.Probe{
-			UID:            "MyVFSMkdir",
-			Section:        "kprobe/vfs_mkdir",
-			KernelFuncName: "kprobe_vfs_mkdir",
+			UID:              "MyVFSMkdir",
+			Section:          "kprobe/vfs_mkdir",
+			EbpfFuncName:     "kprobe_vfs_mkdir",
+			AttachToFuncName: "vfs_mkdir",
 		},
 		&manager.Probe{
 			UID: "", // UID is needed only if there are multiple instances of your program (after using
 			// m.CloneProgram for example), or if multiple programs with the exact same section are attaching
 			// at the exact same hook point (using m.AddHook for example, or simply because another manager
 			// on the system is planning on hooking there).
-			Section:         "kretprobe/mkdirat",
-			KernelFuncName:  "kretpobe_unlinkat",
-			HookFuncName:    "mkdirat",
-			KProbeMaxActive: 100,
+			Section:          "kretprobe/mkdirat",
+			EbpfFuncName:     "kretpobe_unlinkat",
+			AttachToFuncName: "mkdirat",
+			KProbeMaxActive:  100,
 		},
 	},
 }
@@ -65,6 +66,9 @@ func main() {
 
 // wait - Waits until an interrupt or kill signal is sent
 func wait() {
+	logrus.Println("run next testcase after 3 second")
+	time.Sleep(time.Second * 3)
+	return
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, os.Kill)
 	<-sig

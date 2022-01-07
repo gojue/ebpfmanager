@@ -9,14 +9,17 @@ import (
 var m = &manager.Manager{
 	Probes: []*manager.Probe{
 		&manager.Probe{
-			UID:     "MyFirstHook",
-			Section: "kprobe/vfs_mkdir",
+			UID:              "MyFirstHook",
+			Section:          "kprobe/vfs_mkdir",
+			AttachToFuncName: "vfs_mkdir",
+			EbpfFuncName:     "kprobe_vfs_mkdir",
 		},
 		&manager.Probe{
-			UID:             "", // UID is not needed if there will be only one instance of the program
-			Section:         "kretprobe/mkdir",
-			HookFuncName:    "mkdir",
-			KProbeMaxActive: 100,
+			UID:              "", // UID is not needed if there will be only one instance of the program
+			Section:          "kretprobe/mkdir",
+			AttachToFuncName: "mkdir",
+			EbpfFuncName:     "kretpobe_mkdir",
+			KProbeMaxActive:  100,
 		},
 	},
 	PerfMaps: []*manager.PerfMap{
@@ -43,7 +46,7 @@ var editors = []manager.ConstantEditor{
 		Value:         uint64(100),
 		FailOnMissing: true,
 		ProbeIdentificationPairs: []manager.ProbeIdentificationPair{
-			{"MyFirstHook", "kprobe/vfs_mkdir"},
+			{"MyFirstHook", "kprobe_vfs_mkdir"},
 		},
 	},
 	{
@@ -51,7 +54,7 @@ var editors = []manager.ConstantEditor{
 		Value:         uint64(555),
 		FailOnMissing: true,
 		ProbeIdentificationPairs: []manager.ProbeIdentificationPair{
-			{"", "kprobe/vfs_rmdir"},
+			{"", "kprobe_vfs_rmdir"},
 		},
 	},
 	{

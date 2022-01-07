@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"github.com/sirupsen/logrus"
 	"io"
 	"net/http"
@@ -20,5 +21,5 @@ func recoverAssets() io.ReaderAt {
 // trigger - Generate some network traffic to trigger the probe
 func trigger() {
 	logrus.Println("Generating some network traffic to trigger the probes ...")
-	_, _ = http.Get("https://www.google.com/")
+	_, _ = http.Get("https://www.baidu.com/")
 }

@@ -32,7 +32,7 @@ func ConcatErrors(err1, err2 error) error {
 		return err2
 	}
 	if err2 != nil {
-		return fmt.Errorf("error:%v, error2:%v",err1, err2.Error())
+		return fmt.Errorf("error:%v, error2:%v", err1, err2.Error())
 	}
 	return err1
 }
@@ -144,7 +144,7 @@ func getSyscallFnNameWithKallsyms(name string, kallsymsContent string) (string, 
 		arch = "x64"
 	}
 
-	regexStr := `(\b`+ name + `\b)`
+	regexStr := `(\b` + name + `\b)`
 	fnRegex := regexp.MustCompile(regexStr)
 	match := fnRegex.FindAllString(kallsymsContent, -1)
 	if len(match) > 0 {
@@ -207,7 +207,7 @@ func OpenAndListSymbols(path string) (*elf.File, []elf.Symbol, error) {
 	// open elf file
 	f, err := elf.Open(path)
 	if err != nil {
-		return nil, nil, errors.New(fmt.Sprintf("error:%v , couldn't open elf file %s", err , path))
+		return nil, nil, errors.New(fmt.Sprintf("error:%v , couldn't open elf file %s", err, path))
 	}
 	defer f.Close()
 
@@ -242,7 +242,7 @@ func SanitizeUprobeAddresses(f *elf.File, syms []elf.Symbol) {
 		for i, sym := range syms {
 			for _, prog := range f.Progs {
 				if prog.Type == elf.PT_LOAD {
-					if sym.Value >= prog.Vaddr && sym.Value < (prog.Vaddr + prog.Memsz) {
+					if sym.Value >= prog.Vaddr && sym.Value < (prog.Vaddr+prog.Memsz) {
 						syms[i].Value = sym.Value - prog.Vaddr + prog.Off
 					}
 				}

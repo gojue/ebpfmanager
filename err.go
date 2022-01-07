@@ -10,7 +10,7 @@ var (
 	// Deprecated: 废弃段相关问题
 	ErrUnknownSection = errors.New("unknown section")
 
-	ErrUnknownMatchFuncName = errors.New("unknown MatchFuncName")
+	ErrUnknownMatchFuncName = errors.New("unknown EbpfFuncName")
 	ErrUnknownMatchFuncSpec = errors.New("unknown MatchFuncSpec")
 	ErrUnknownMap = errors.New("unknown bpf map")
 	ErrPinnedObjectNotFound = errors.New("pinned object not found")

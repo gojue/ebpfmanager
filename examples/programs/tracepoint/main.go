@@ -9,8 +9,8 @@ import (
 var m = &manager.Manager{
 	Probes: []*manager.Probe{
 		&manager.Probe{
-			Section: "tracepoint/syscalls/sys_enter_mkdirat",
-			MatchFuncName: "tracepoint_sys_enter_mkdirat",
+			Section:        "tracepoint/syscalls/sys_enter_mkdirat",
+			KernelFuncName: "tracepoint_sys_enter_mkdirat",
 		},
 	},
 }

@@ -9,7 +9,7 @@ run_make()
         fi
 }
 
-myfunc()
+testmakes()
 {
         cd $1;
         run_make;
@@ -17,11 +17,11 @@ myfunc()
         for x in $(ls .)
         do
                 if [ -d "$x" ];then
-                        myfunc $x;
+                        testmakes $x;
                         cd ..
                 fi
             
         done
 }
 
-myfunc .
+testmakes .

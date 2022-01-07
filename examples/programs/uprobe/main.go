@@ -9,9 +9,9 @@ import (
 var m = &manager.Manager{
 	Probes: []*manager.Probe{
 		&manager.Probe{
-			Section:    "uprobe/readline",
-			MatchFuncName:    "uprobe_readline",
-			BinaryPath: "/usr/bin/bash",
+			Section:        "uprobe/readline",
+			KernelFuncName: "uprobe_readline",
+			BinaryPath:     "/usr/bin/bash",
 		},
 	},
 }

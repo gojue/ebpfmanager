@@ -10,22 +10,22 @@ import (
 var m = &manager.Manager{
 	Probes: []*manager.Probe{
 		&manager.Probe{
-			Section: "kprobe/mkdirat",
-			PinPath: "/sys/fs/bpf/mkdirat",
-			SyscallFuncName: "mkdirat",
+			Section:      "kprobe/mkdirat",
+			PinPath:      "/sys/fs/bpf/mkdirat",
+			HookFuncName: "mkdirat",
 		},
 		&manager.Probe{
-			Section: "kretprobe/mkdirat",
-			SyscallFuncName: "mkdirat",
+			Section:      "kretprobe/mkdirat",
+			HookFuncName: "mkdirat",
 		},
 		&manager.Probe{
-			Section: "kprobe/mkdir",
-			PinPath: "/sys/fs/bpf/mkdir",
-			SyscallFuncName: "mkdir",
+			Section:      "kprobe/mkdir",
+			PinPath:      "/sys/fs/bpf/mkdir",
+			HookFuncName: "mkdir",
 		},
 		&manager.Probe{
-			Section: "kretprobe/mkdir",
-			SyscallFuncName: "mkdir",
+			Section:      "kretprobe/mkdir",
+			HookFuncName: "mkdir",
 		},
 	},
 	Maps: []*manager.Map{

@@ -12,9 +12,9 @@ import (
 var m = &manager.Manager{
 	Probes: []*manager.Probe{
 		&manager.Probe{
-			UID:           "MyVFSMkdir",
-			Section:       "kprobe/vfs_mkdir",
-			MatchFuncName: "kprobe_vfs_mkdir",
+			UID:            "MyVFSMkdir",
+			Section:        "kprobe/vfs_mkdir",
+			KernelFuncName: "kprobe_vfs_mkdir",
 		},
 		&manager.Probe{
 			UID: "", // UID is needed only if there are multiple instances of your program (after using
@@ -22,8 +22,8 @@ var m = &manager.Manager{
 			// at the exact same hook point (using m.AddHook for example, or simply because another manager
 			// on the system is planning on hooking there).
 			Section:         "kretprobe/mkdirat",
-			MatchFuncName:   "kretpobe_unlinkat",
-			SyscallFuncName: "mkdirat",
+			KernelFuncName:  "kretpobe_unlinkat",
+			HookFuncName:    "mkdirat",
 			KProbeMaxActive: 100,
 		},
 	},

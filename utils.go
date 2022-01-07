@@ -2,17 +2,14 @@ package manager
 
 import (
 	"debug/elf"
+	"errors"
 	"fmt"
 	"io/ioutil"
-	"os"
 	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
-
-	"errors"
 )
 
 type state uint
@@ -98,18 +95,25 @@ func GetSyscallFnNameWithSymFile(name string, symFile string) (string, error) {
 	if symFile == "" {
 		symFile = defaultSymFile
 	}
+
+	//如果能直接找到
+	syscallName, err := getSyscallName(name, symFile)
+	if err == nil {
+		return syscallName, nil
+	}
+
 	if syscallPrefix == "" {
-		syscall, err := getSyscallName("open", symFile)
+		syscallName, err := getSyscallName("open", symFile)
 		if err != nil {
 			return "", err
 		}
 		// copy to avoid memory leak due to go subslice
 		// see: https://go101.org/article/memory-leaking.html
 		var b strings.Builder
-		b.WriteString(syscall)
-		syscall = b.String()
+		b.WriteString(syscallName)
+		syscallName = b.String()
 
-		syscallPrefix = strings.TrimSuffix(syscall, "open")
+		syscallPrefix = strings.TrimSuffix(syscallName, "open")
 	}
 
 	return syscallPrefix + name, nil
@@ -140,12 +144,19 @@ func getSyscallFnNameWithKallsyms(name string, kallsymsContent string) (string, 
 		arch = "x64"
 	}
 
+	regexStr := `(\b`+ name + `\b)`
+	fnRegex := regexp.MustCompile(regexStr)
+	match := fnRegex.FindAllString(kallsymsContent, -1)
+	if len(match) > 0 {
+		return match[0], nil
+	}
+
 	// We should search for new syscall function like "__x64__sys_open"
 	// Note the start of word boundary. Should return exactly one string
-	regexStr := `(\b__` + arch + `_[Ss]y[sS]_` + name + `\b)`
-	fnRegex := regexp.MustCompile(regexStr)
+	regexStr = `(\b__` + arch + `_[Ss]y[sS]_` + name + `\b)`
+	fnRegex = regexp.MustCompile(regexStr)
 
-	match := fnRegex.FindAllString(kallsymsContent, -1)
+	match = fnRegex.FindAllString(kallsymsContent, -1)
 	if len(match) > 0 {
 		return match[0], nil
 	}
@@ -189,48 +200,6 @@ func GenerateEventName(probeType, funcName, UID string, attachPID int) (string, 
 		return "", fmt.Errorf("event name too long (kernel limit MAX_EVENT_NAME_LEN is %d): '%s'", MaxEventNameLen, eventName)
 	}
 	return eventName, nil
-}
-
-// ReadKprobeEvents - Returns the content of kprobe_events
-func ReadKprobeEvents() (string, error) {
-	kprobeEvents, err := ioutil.ReadFile("/sys/kernel/debug/tracing/kprobe_events")
-	if err != nil {
-		return "", err
-	}
-	return string(kprobeEvents), nil
-}
-
-func disableKprobeEvent(eventName string) error {
-	// Write line to kprobe_events
-	kprobeEventsFileName := "/sys/kernel/debug/tracing/kprobe_events"
-	f, err := os.OpenFile(kprobeEventsFileName, os.O_APPEND|os.O_WRONLY, 0)
-	if err != nil {
-		return errors.New(fmt.Sprintf("error:%v , cannot open kprobe_events", err))
-	}
-	defer f.Close()
-	cmd := fmt.Sprintf("-:%s\n", eventName)
-	if _, err = f.WriteString(cmd); err != nil {
-		pathErr, ok := err.(*os.PathError)
-		if ok && pathErr.Err == syscall.ENOENT {
-			// This can happen when for example two modules
-			// use the same elf object and both ratecall `Close()`.
-			// The second will encounter the error as the
-			// probe already has been cleared by the first.
-			return nil
-		} else {
-			return errors.New(fmt.Sprintf("error:%v , cannot write %q to kprobe_events", err , cmd))
-		}
-	}
-	return nil
-}
-
-// ReadUprobeEvents - Returns the content of uprobe_events
-func ReadUprobeEvents() (string, error) {
-	uprobeEvents, err := ioutil.ReadFile("/sys/kernel/debug/tracing/uprobe_events")
-	if err != nil {
-		return "", err
-	}
-	return string(uprobeEvents), nil
 }
 
 // OpenAndListSymbols - Opens an elf file and extracts all its symbols

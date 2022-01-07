@@ -49,16 +49,16 @@ const (
 type ProbeIdentificationPair struct {
 	UID string
 	//Section string
-	MatchFuncName string //在cilium/efbp v0.7.0里，返回的paramsspec中，改为以.o字节码中符号表函数名为索引的map，故这里改为matchfunName。 section信息无法使用
+	EbpfFuncName string //在cilium/efbp v0.7.0里，返回的paramsspec中，改为以.o字节码中符号表函数名为索引的map，故这里改为matchfunName。 section信息无法使用
 }
 
 func (pip ProbeIdentificationPair) String() string {
-	return fmt.Sprintf("{UID:%s, MatchFuncName:%s}", pip.UID, pip.MatchFuncName)
+	return fmt.Sprintf("{UID:%s, EbpfFuncName:%s}", pip.UID, pip.EbpfFuncName)
 }
 
 // Matches - Returns true if the identification pair (probe uid, probe section) matches.
 func (pip ProbeIdentificationPair) Matches(id ProbeIdentificationPair) bool {
-	return pip.UID == id.UID && pip.MatchFuncName == id.MatchFuncName
+	return pip.UID == id.UID && pip.EbpfFuncName == id.EbpfFuncName
 }
 
 // Probe - Main eBPF probe wrapper. This structure is used to store the required data to attach a loaded eBPF
@@ -95,13 +95,13 @@ type Probe struct {
 	// CopyProgram - When enabled, this option will make a unique copy of the program section for the current program
 	CopyProgram bool
 
-	// SyscallFuncName - Name of the syscall on which the program should be hooked. As the exact kernel symbol may
+	// HookFuncName - Name of the syscall on which the program should be hooked. As the exact kernel symbol may
 	// differ from one kernel version to the other, the right prefix will be computed automatically at runtime.
 	// If a syscall name is not provided, the section name (without its probe type prefix) is assumed to be the
 	// hook point.
-	SyscallFuncName string
+	HookFuncName string
 
-	// MatchFuncName - Pattern used to find the function(s) to attach to
+	// KernelFuncName - Pattern used to find the function(s) to attach to
 	// FOR KPROBES: When this option is activated, the provided pattern is matched against the list of available symbols
 	// in /sys/kernel/debug/tracing/available_filter_functions. If the exact function does not exist, then the first
 	// symbol matching the provided pattern will be used. This option requires debugfs.
@@ -109,7 +109,7 @@ type Probe struct {
 	// FOR UPROBES: When this option is activated, the provided pattern is matched the list of symbols in the symbol
 	// table of the provided elf binary. If the exact function does not exist, then the first symbol matching the
 	// provided pattern will be used.
-	MatchFuncName string
+	KernelFuncName string
 
 	// Enabled - Indicates if a probe should be enabled or not. This parameter can be set at runtime using the
 	// Manager options (see ActivatedProbes)
@@ -173,20 +173,20 @@ type Probe struct {
 // Copy - Returns a copy of the current probe instance. Only the exported fields are copied.
 func (p *Probe) Copy() *Probe {
 	return &Probe{
-		UID:              p.UID,
-		Section:          p.Section,
-		SyscallFuncName:  p.SyscallFuncName,
-		MatchFuncName:    p.MatchFuncName,
-		Enabled:          p.Enabled,
-		PinPath:          p.PinPath,
-		KProbeMaxActive:  p.KProbeMaxActive,
-		BinaryPath:       p.BinaryPath,
-		CGroupPath:       p.CGroupPath,
-		SocketFD:         p.SocketFD,
-		Ifindex:          p.Ifindex,
-		Ifname:           p.Ifname,
-		IfindexNetns:     p.IfindexNetns,
-		XDPAttachMode:    p.XDPAttachMode,
+		UID:             p.UID,
+		Section:         p.Section,
+		HookFuncName:    p.HookFuncName,
+		KernelFuncName:  p.KernelFuncName,
+		Enabled:         p.Enabled,
+		PinPath:         p.PinPath,
+		KProbeMaxActive: p.KProbeMaxActive,
+		BinaryPath:      p.BinaryPath,
+		CGroupPath:      p.CGroupPath,
+		SocketFD:        p.SocketFD,
+		Ifindex:         p.Ifindex,
+		Ifname:          p.Ifname,
+		IfindexNetns:    p.IfindexNetns,
+		XDPAttachMode:   p.XDPAttachMode,
 		NetworkDirection: p.NetworkDirection,
 		ProbeRetry:       p.ProbeRetry,
 		ProbeRetryDelay:  p.ProbeRetryDelay,
@@ -205,7 +205,7 @@ func (p *Probe) IdentificationPairMatches(id ProbeIdentificationPair) bool {
 
 // GetIdentificationPair - Returns the identification pair (probe section, probe UID)
 func (p *Probe) GetIdentificationPair() ProbeIdentificationPair {
-	return ProbeIdentificationPair{p.UID, p.MatchFuncName}
+	return ProbeIdentificationPair{p.UID, p.KernelFuncName}
 }
 
 // IsRunning - Returns true if the probe was successfully initialized, started and is currently running.
@@ -268,13 +268,10 @@ func (p *Probe) Program() *ebpf.Program {
 
 // init - Internal initialization function
 func (p *Probe) init() error {
-	if p.MatchFuncName == "" {
-		return errors.New("MatchFuncName cant be null")
+	if p.KernelFuncName == "" || p.Section == "" || p.HookFuncName == "" {
+		return errors.New("EbpfFuncName/Section/HookFuncName cant be null")
 	}
 
-	if p.Section == "" {
-		return errors.New("Section cant be null")
-	}
 	// Load spec if necessary
 	if p.manualLoadNeeded {
 		prog, err := ebpf.NewProgramWithOptions(p.programSpec, p.manager.options.VerifierOptions.Programs)
@@ -286,7 +283,7 @@ func (p *Probe) init() error {
 	}
 
 	// override matchFuncName based on the CopyProgram parameter
-	matchFuncName := p.MatchFuncName
+	matchFuncName := p.KernelFuncName
 	if p.CopyProgram {
 		matchFuncName += p.UID
 	}
@@ -319,23 +316,29 @@ func (p *Probe) init() error {
 		p.checkPin = false
 	}
 
-	// Update syscall function name with the correct arch prefix
-	if p.SyscallFuncName != "" {
+	// Find function name match if required
+	var kProbe = false
+	if strings.HasPrefix(p.Section, "kretprobe/") || (strings.HasPrefix(p.Section, "kprobe/")) {
 		var err error
-		p.funcName, err = GetSyscallFnNameWithSymFile(p.SyscallFuncName, p.manager.options.SymFile)
+		p.funcName, err = FindFilterFunction(p.Section)
 		if err != nil {
 			p.lastError = err
 			return err
 		}
-	} else {
-		// Find function name match if required
-		if strings.HasPrefix(p.Section, "kretprobe/") || (strings.HasPrefix(p.Section, "kprobe/")) {
-			var err error
-			p.funcName, err = FindFilterFunction(p.Section)
-			if err != nil {
-				p.lastError = err
-				return err
-			}
+		kProbe = true
+	}
+
+	if kProbe {
+		p.funcName = p.HookFuncName
+
+	}
+	// Update syscall function name with the correct arch prefix
+	if p.HookFuncName != "" {
+		var err error
+		p.funcName, err = GetSyscallFnNameWithSymFile(p.HookFuncName, p.manager.options.SymFile)
+		if err != nil {
+			p.lastError = err
+			return err
 		}
 	}
 
@@ -430,7 +433,7 @@ func (p *Probe) attach() error {
 		p.lastError = err
 		// Clean up any progress made in the attach attempt
 		_ = p.stop(false)
-		return errors.New(fmt.Sprintf("error:%v , couldn't start probe %s", err, p.MatchFuncName))
+		return errors.New(fmt.Sprintf("error:%v , couldn't start probe %s", err, p.KernelFuncName))
 	}
 
 	// update probe state
@@ -529,7 +532,7 @@ func (p *Probe) stop(saveStopError bool) error {
 		}
 		return nil
 	}
-	return errors.New(fmt.Sprintf("error:%v , couldn't stop probe %s", err, p.MatchFuncName))
+	return errors.New(fmt.Sprintf("error:%v , couldn't stop probe %s", err, p.KernelFuncName))
 }
 
 // reset - Cleans up the internal fields of the probe
@@ -594,7 +597,7 @@ func (p *Probe) attachTracepoint() error {
 
 	kp, err := link.Tracepoint(category, name, p.program)
 	if err != nil {
-		return errors.New(fmt.Sprintf("error:%v , couldn's activate tracepoint %s, matchFuncName:%s", err, p.Section, p.MatchFuncName))
+		return errors.New(fmt.Sprintf("error:%v , couldn's activate tracepoint %s, matchFuncName:%s", err, p.Section, p.KernelFuncName))
 	}
 	p.link = kp
 	return nil
@@ -618,7 +621,7 @@ func (p *Probe) attachUprobe() error {
 
 	// compute the offset if it was not provided
 	if p.UprobeOffset == 0 {
-		if len(p.SyscallFuncName) <= 0 {
+		if len(p.HookFuncName) <= 0 {
 			// find the offset of the first symbol matching the provided pattern
 			funcName = fmt.Sprintf("^%s$", funcName)
 			pattern, err := regexp.Compile(funcName)
@@ -634,12 +637,12 @@ func (p *Probe) attachUprobe() error {
 			p.UprobeOffset = offsets[0].Value
 			p.funcName = offsets[0].Name
 		}
-		p.funcName = p.SyscallFuncName
+		p.funcName = p.HookFuncName
 	}
 
 	ex, err := link.OpenExecutable(p.BinaryPath)
 	if err != nil {
-		return errors.New(fmt.Sprintf("error:%v , couldn't enable uprobe %s", err, p.MatchFuncName))
+		return errors.New(fmt.Sprintf("error:%v , couldn't enable uprobe %s", err, p.KernelFuncName))
 	}
 	opts := &link.UprobeOptions{
 		Offset: p.UprobeOffset,

@@ -160,8 +160,8 @@ type Options struct {
 	// Deprecated: 废弃段信息
 	ExcludedSections []string
 
-	// ExcludedMatchFuns 用于存储排除的符号表函数列表。来自ebpf字节码中符号表函数。
-	ExcludedMatchFuns []string
+	// ExcludedEbpfFuncs 用于存储排除的符号表函数列表。来自ebpf字节码中符号表函数。
+	ExcludedEbpfFuncs []string
 
 	// ConstantsEditor - Post-compilation constant edition. See ConstantEditor for more.
 	ConstantEditors []ConstantEditor
@@ -366,14 +366,14 @@ func (m *Manager) GetProgram(id ProbeIdentificationPair) ([]*ebpf.Program, bool,
 	}
 	if id.UID == "" {
 		for _, probe := range m.Probes {
-			if probe.MatchFuncName == id.MatchFuncName {
+			if probe.KernelFuncName == id.EbpfFuncName {
 				programs = append(programs, probe.program)
 			}
 		}
 		if len(programs) > 0 {
 			return programs, true, nil
 		}
-		prog, ok := m.collection.Programs[id.MatchFuncName]
+		prog, ok := m.collection.Programs[id.EbpfFuncName]
 		return []*ebpf.Program{prog}, ok, nil
 	}
 	for _, probe := range m.Probes {
@@ -401,7 +401,7 @@ func (m *Manager) GetProgramSpec(id ProbeIdentificationPair) ([]*ebpf.ProgramSpe
 			//if probe.Section == id.Section {
 			//	programs = append(programs, probe.programSpec)
 			//}
-			if probe.MatchFuncName == id.MatchFuncName {
+			if probe.KernelFuncName == id.EbpfFuncName {
 				programs = append(programs, probe.programSpec)
 			}
 		}
@@ -409,7 +409,7 @@ func (m *Manager) GetProgramSpec(id ProbeIdentificationPair) ([]*ebpf.ProgramSpe
 			return programs, true, nil
 		}
 		//prog, ok := m.collectionSpec.Programs[id.Section]
-		prog, ok := m.collectionSpec.Programs[id.MatchFuncName]
+		prog, ok := m.collectionSpec.Programs[id.EbpfFuncName]
 		return []*ebpf.ProgramSpec{prog}, ok, nil
 	}
 	for _, probe := range m.Probes {
@@ -476,7 +476,7 @@ func (m *Manager) InitWithOptions(elf io.ReaderAt, options Options) error {
 	}
 
 	// Remove excluded sections
-	for _, excludedMatchFun := range m.options.ExcludedMatchFuns {
+	for _, excludedMatchFun := range m.options.ExcludedEbpfFuncs {
 		delete(m.collectionSpec.Programs, excludedMatchFun)
 	}
 	// Match Maps and program specs
@@ -612,7 +612,7 @@ func (m *Manager) stop(cleanup MapCleanupType) error {
 	for _, probe := range m.Probes {
 		e := probe.Stop()
 		if e != nil {
-			e = errors.New(fmt.Sprintf("error:%v , program %s couldn't gracefully shut down", e,  probe.MatchFuncName))
+			e = errors.New(fmt.Sprintf("error:%v , program %s couldn't gracefully shut down", e,  probe.KernelFuncName))
 		}
 		err = ConcatErrors(err,e)
 	}
@@ -744,7 +744,7 @@ func (m *Manager) ClonePerfRing(name string, newName string, options MapOptions,
 // you will need it if you want to detach the program later. The original program is selected using the provided UID and
 // the section provided in the new probe.
 func (m *Manager) AddHook(UID string, newProbe Probe) error {
-	oldID := ProbeIdentificationPair{UID, newProbe.MatchFuncName}
+	oldID := ProbeIdentificationPair{UID, newProbe.KernelFuncName}
 	// Look for the eBPF program
 	progs, found, err := m.GetProgram(oldID)
 	if err != nil {
@@ -849,7 +849,7 @@ func (m *Manager) DetachHook(section string, UID string) error {
 // using a MapEditor. The original program is selected using the provided UID and the section provided in the new probe.
 // Note that the BTF based constant edition will note work with this method.
 func (m *Manager) CloneProgram(UID string, newProbe Probe, constantsEditors []ConstantEditor, mapEditors map[string]*ebpf.Map) error {
-	oldID := ProbeIdentificationPair{UID, newProbe.MatchFuncName}
+	oldID := ProbeIdentificationPair{UID, newProbe.KernelFuncName}
 	// Find the program specs
 	progSpecs, found, err := m.GetProgramSpec(oldID)
 	if err != nil {
@@ -1000,7 +1000,7 @@ func (m *Manager) getProbeProgramSpec(matchFuncName string) (*ebpf.ProgramSpec, 
 	if !ok {
 		// Check if the probe section is in the list of excluded sections
 		var excluded bool
-		for _, excludedSection := range m.options.ExcludedMatchFuns {
+		for _, excludedSection := range m.options.ExcludedEbpfFuncs {
 			if excludedSection == matchFuncName {
 				excluded = true
 				break
@@ -1018,7 +1018,7 @@ func (m *Manager) matchSpecs() error {
 
 	// Match programs
 	for _, probe := range m.Probes {
-		programSpec, err := m.getProbeProgramSpec(probe.MatchFuncName)
+		programSpec, err := m.getProbeProgramSpec(probe.KernelFuncName)
 		if err != nil {
 			return err
 		}
@@ -1026,7 +1026,7 @@ func (m *Manager) matchSpecs() error {
 			probe.programSpec = programSpec
 		} else {
 			probe.programSpec = programSpec.Copy()
-			m.collectionSpec.Programs[probe.MatchFuncName+probe.UID] = probe.programSpec
+			m.collectionSpec.Programs[probe.KernelFuncName+probe.UID] = probe.programSpec
 		}
 	}
 
@@ -1063,8 +1063,8 @@ func (m *Manager) activateProbes() {
 				}
 			}
 		}
-		for _, p := range m.options.ExcludedMatchFuns {
-			if mProbe.MatchFuncName == p {
+		for _, p := range m.options.ExcludedEbpfFuncs {
+			if mProbe.KernelFuncName == p {
 				shouldActivate = false
 			}
 		}
@@ -1123,7 +1123,6 @@ func (m *Manager) UpdateActivatedProbes(selectors []ProbesSelector) error {
 	var validationErrs error
 	for _, selector := range m.options.ActivatedProbes {
 		if err := selector.RunValidator(m); err != nil {
-			fmt.Println(fmt.Sprintf("### selector:%v, error:%v", selector.GetProbesIdentificationPairList(),err))
 			validationErrs = multierror.Append(validationErrs, err)
 		}
 	}
@@ -1406,7 +1405,7 @@ func (m *Manager) loadPinnedProgram(prog *Probe) error {
 	prog.program = pinnedProg
 
 	// Detach program from CollectionSpec
-	delete(m.collectionSpec.Programs, prog.MatchFuncName)
+	delete(m.collectionSpec.Programs, prog.KernelFuncName)
 	return nil
 }
 

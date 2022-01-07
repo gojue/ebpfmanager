@@ -42,7 +42,7 @@ func main() {
 	// Get xdp program used to trigger the tests
 	testProgs, found, err := m.GetProgram(
 		manager.ProbeIdentificationPair{
-			MatchFuncName: "my_func_test",
+			EbpfFuncName: "my_func_test",
 		},
 	)
 	if !found || err != nil {

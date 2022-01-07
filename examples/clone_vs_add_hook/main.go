@@ -15,7 +15,7 @@ var m = &manager.Manager{
 		&manager.Probe{
 			UID:             "", // UID is not needed if there will be only one instance of the program
 			Section:         "kretprobe/mkdir",
-			SyscallFuncName: "mkdir",
+			HookFuncName:    "mkdir",
 			KProbeMaxActive: 100,
 		},
 	},

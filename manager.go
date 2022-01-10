@@ -95,6 +95,9 @@ type MapSpecEditor struct {
 	Flags uint32
 	// EditorFlag - Use this flag to specify what fields should be updated. See MapSpecEditorFlag.
 	EditorFlag MapSpecEditorFlag
+
+	// InnerMap
+	InnerMap *ebpf.MapSpec
 }
 
 // ProbesSelector - A probe selector defines how a probe (or a group of probes) should be activated.
@@ -340,6 +343,25 @@ func (m *Manager) GetMapSpec(name string) (*ebpf.MapSpec, bool, error) {
 		}
 	}
 	return nil, false, nil
+}
+
+// editMapSpec -
+func (m *Manager) editMapSpec(name string, mapSpec *ebpf.MapSpec) (error) {
+	m.stateLock.RLock()
+	defer m.stateLock.RUnlock()
+	if m.collectionSpec == nil || m.state < initialized {
+		return ErrManagerNotInitialized
+	}
+
+	//判断是否存在该map
+	_, ok := m.collectionSpec.Maps[name]
+	if !ok {
+		return ErrUnknownMap
+	}
+
+	//覆盖mapSpec
+	m.collectionSpec.Maps[name] = mapSpec
+	return nil
 }
 
 // GetPerfMap - Select a perf map by its name
@@ -1209,8 +1231,8 @@ func (m *Manager) editMapSpecs() error {
 		}
 
 		// InnerMap  替换
-		if mapEditor.Type == ebpf.ArrayOfMaps {
-
+		if mapEditor.InnerMap != nil {
+			spec.InnerMap = mapEditor.InnerMap
 		}
 	}
 	return nil

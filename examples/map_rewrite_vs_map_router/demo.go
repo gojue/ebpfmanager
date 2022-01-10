@@ -23,6 +23,18 @@ func demoMapEditor() error {
 	options := manager.Options{MapEditors: map[string]*ebpf.Map{
 		"shared_cache1": sharedCache1,
 	},
+	MapSpecEditors: map[string]manager.MapSpecEditor{
+		"maps_router": {
+			InnerMap: &ebpf.MapSpec{
+				Name:       "routed_cache",
+				Type:       ebpf.Hash,
+				KeySize:    4,
+				ValueSize:  4,
+				MaxEntries: 10,
+				Flags: 0,
+			},
+		},
+	},
 	}
 	// Initialize m2, edit shared_cache1 and start it
 	if err = m2.InitWithOptions(recoverAsset("/prog2.o"), options); err != nil {

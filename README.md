@@ -1,7 +1,7 @@
 # 介绍
 [![](https://godoc.org/github.com/ehids/ebpfmanager?status.svg)](https://godoc.org/github.com/ehids/ebpfmanager)
 
-![HoneyGopher](./cilium-ebpf.png)
+![HoneyGopher](./ehids-logo-1.png)
 
 ebpfmanager参照datadog/ebpf/manager包的思想，基于cilium/ebpf实现的ebpf类库封装。
 
@@ -11,7 +11,8 @@ ebpfmanager参照datadog/ebpf/manager包的思想，基于cilium/ebpf实现的eb
 
 
 # 依赖
-* [cilium/ebpf v0.7.0](https://github.com/cilium/ebpf/releases/tag/v0.7.0)    11 Oct, 2021
+
+* [cilium/ebpf v0.8.0](https://github.com/cilium/ebpf/releases/tag/v0.8.0)    21 Jan, 2022
 * [go-bindata](github.com/shuLhan/go-bindata/cmd/go-bindata)  用于生成ebpf字节码文件的go包，与`go:embed`类似。
 ```shell
 go get -d github.com/shuLhan/go-bindata/cmd/go-bindata
@@ -88,8 +89,13 @@ func main() {
 }
 ```
 
+# 案例项目
+
+[A Linux Host-based Intrusion Detection System based on eBPF.](https://github.com/ehids/ehids)
+
 # 注意
 
 1. v0.7.0 版本的ebpf在`loadProgram`函数返回的progs map中，索引已经改为C代码中函数名。 见`elf_reader.go`312行`res[prog.Name] = prog`
    ，这点不同于老版本。（老版本是以section名字作为索引）
-2. 在 [datadog/ebpf af587081](https://github.com/DataDog/ebpf/commit/af5870810f0b2c2f9ba996d02db16955de58266f)  Nov 17, 2021 版本上实现本类库。
+2. 在 [datadog/ebpf af587081](https://github.com/DataDog/ebpf/commit/af5870810f0b2c2f9ba996d02db16955de58266f)  Nov 17,
+   2021 版本上实现本类库。

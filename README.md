@@ -5,14 +5,14 @@
 
 ebpfmanager参照datadog/ebpf/manager包的思想，基于cilium/ebpf实现的ebpf类库封装。
 
-相比`cilium/ebpf`实现配置化，自动加载，更具备面向对象思想，且实现了`probe`颗粒的卡开启关闭功能。
-相比`datadog/ebpf`，实现了依赖包方式加载`cilium/ebpf`，而非fork方式，这点与其期望走的方向一致。且依赖`cilium/ebpf`版本更新到最新v0.7.0。
+相比`cilium/ebpf`实现配置化，自动加载，更具备面向对象思想，且实现了`probe`颗粒的卡开启关闭功能。 相比`datadog/ebpf`，实现了依赖包方式加载`cilium/ebpf`
+，而非fork方式，这点与其期望走的方向一致。且依赖`cilium/ebpf`版本更新到最新v0.8.1。
 >Work is underway to convert this library to wrap the upstream library, rather than forking.
 
 
 # 依赖
 
-* [cilium/ebpf v0.8.0](https://github.com/cilium/ebpf/releases/tag/v0.8.0)    21 Jan, 2022
+* [cilium/ebpf v0.8.1](https://github.com/cilium/ebpf/releases/tag/v0.8.1)    22 Feb, 2022
 * [go-bindata](github.com/shuLhan/go-bindata/cmd/go-bindata)  用于生成ebpf字节码文件的go包，与`go:embed`类似。
 ```shell
 go get -d github.com/shuLhan/go-bindata/cmd/go-bindata
@@ -95,7 +95,7 @@ func main() {
 
 # 注意
 
-1. v0.7.0 版本的ebpf在`loadProgram`函数返回的progs map中，索引已经改为C代码中函数名。 见`elf_reader.go`312行`res[prog.Name] = prog`
+1. v0.7.0及以后的版本中，ebpf在`loadProgram`函数返回的progs map中，索引已经改为C代码中函数名。 见`elf_reader.go`312行`res[prog.Name] = prog`
    ，这点不同于老版本。（老版本是以section名字作为索引）
 2. 在 [datadog/ebpf af587081](https://github.com/DataDog/ebpf/commit/af5870810f0b2c2f9ba996d02db16955de58266f)  Nov 17,
    2021 版本上实现本类库。

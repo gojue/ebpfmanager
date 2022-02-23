@@ -8,7 +8,7 @@ import (
 
 var m = &manager.Manager{
 	Probes: []*manager.Probe{
-		&manager.Probe{
+		{
 			Section:       "xdp/ingress",
 			EbpfFuncName:  "egress_cls_func",
 			Ifindex:       2, // change this to the interface index connected to the internet

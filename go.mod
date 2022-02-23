@@ -4,7 +4,7 @@ go 1.17
 
 require (
 	github.com/avast/retry-go v3.0.0+incompatible
-	github.com/cilium/ebpf v0.8.0
+	github.com/cilium/ebpf v0.8.1
 	github.com/florianl/go-tc v0.4.0
 	github.com/hashicorp/go-multierror v1.1.1
 	github.com/sirupsen/logrus v1.8.1

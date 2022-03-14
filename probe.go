@@ -634,22 +634,6 @@ func (p *Probe) attachUprobe() error {
 	// compute the offset if it was not provided
 	if p.UprobeOffset == 0 {
 		p.funcName = p.AttachToFuncName
-		//if len(p.AttachToFuncName) <= 0 {
-		//	// find the offset of the first symbol matching the provided pattern
-		//	funcName = fmt.Sprintf("^%s$", funcName)
-		//	pattern, err := regexp.Compile(funcName)
-		//	if err != nil {
-		//		return errors.New(fmt.Sprintf("error:%v , failed to compile pattern %s", err, funcName))
-		//	}
-		//
-		//	// Retrieve dynamic symbol offset
-		//	offsets, err := FindSymbolOffsets(p.BinaryPath, pattern)
-		//	if err != nil {
-		//		return errors.New(fmt.Sprintf("error:%v , couldn't find symbol matching %s in %s", err, pattern.String(), p.BinaryPath))
-		//	}
-		//	p.UprobeOffset = offsets[0].Value
-		//	p.funcName = offsets[0].Name
-		//}
 	}
 
 	ex, err := link.OpenExecutable(p.BinaryPath)
@@ -658,7 +642,7 @@ func (p *Probe) attachUprobe() error {
 	}
 	opts := &link.UprobeOptions{
 		Offset: p.UprobeOffset,
-		PID:    p.attachPID,
+		//PID:    p.attachPID,
 	}
 	var kp link.Link
 	if isRet {

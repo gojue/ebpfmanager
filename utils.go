@@ -107,11 +107,6 @@ func GetSyscallFnNameWithSymFile(name string, symFile string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		// copy to avoid memory leak due to go subslice
-		// see: https://go101.org/article/memory-leaking.html
-		var b strings.Builder
-		b.WriteString(syscallName)
-		syscallName = b.String()
 
 		syscallPrefix = strings.TrimSuffix(syscallName, "open")
 	}
@@ -143,12 +138,14 @@ func getSyscallFnNameWithKallsyms(name string, kallsymsContent string) (string, 
 	default:
 		arch = "x64"
 	}
+	var b strings.Builder
 
 	regexStr := `(\b` + name + `\b)`
 	fnRegex := regexp.MustCompile(regexStr)
 	match := fnRegex.FindAllString(kallsymsContent, -1)
 	if len(match) > 0 {
-		return match[0], nil
+		b.WriteString(match[0])
+		return b.String(), nil
 	}
 
 	// We should search for new syscall function like "__x64__sys_open"
@@ -158,7 +155,8 @@ func getSyscallFnNameWithKallsyms(name string, kallsymsContent string) (string, 
 
 	match = fnRegex.FindAllString(kallsymsContent, -1)
 	if len(match) > 0 {
-		return match[0], nil
+		b.WriteString(match[0])
+		return b.String(), nil
 	}
 
 	// If nothing found, search for old syscall function to be sure
@@ -168,7 +166,8 @@ func getSyscallFnNameWithKallsyms(name string, kallsymsContent string) (string, 
 	// If we get something like 'sys_open' or 'SyS_open', return
 	// either (they have same addr) else, just return original string
 	if len(match) > 0 {
-		return match[0], nil
+		b.WriteString(match[0])
+		return b.String(), nil
 	}
 
 	// check for '__' prefixed functions, like '__sys_open'
@@ -178,7 +177,8 @@ func getSyscallFnNameWithKallsyms(name string, kallsymsContent string) (string, 
 	// If we get something like '__sys_open' or '__SyS_open', return
 	// either (they have same addr) else, just return original string
 	if len(match) > 0 {
-		return match[0], nil
+		b.WriteString(match[0])
+		return b.String(), nil
 	}
 
 	return "", errors.New("could not find a valid syscall name")

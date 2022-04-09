@@ -651,7 +651,7 @@ func (p *Probe) attachUprobe() error {
 		kp, err = ex.Uprobe(p.funcName, p.program, opts)
 	}
 	if err != nil {
-		return fmt.Errorf("opening uprobe: %s , isRet:%d", err, isRet)
+		return fmt.Errorf("opening uprobe: %s , isRet:%b", err, isRet)
 	}
 	p.link = kp
 	return nil

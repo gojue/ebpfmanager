@@ -13,7 +13,7 @@ ebpfmanager参照datadog/ebpf/manager包的思想，基于cilium/ebpf实现的eb
 # 依赖
 
 * [cilium/ebpf v0.8.1](https://github.com/cilium/ebpf/releases/tag/v0.8.1)    22 Feb, 2022
-* [go-bindata](github.com/shuLhan/go-bindata/cmd/go-bindata)  用于生成ebpf字节码文件的go包，与`go:embed`类似。
+* [go-bindata](https://github.com/shuLhan/go-bindata/cmd/go-bindata)  用于生成ebpf字节码文件的go包，与`go:embed`类似。
 ```shell
 go get -d github.com/shuLhan/go-bindata/cmd/go-bindata
 ```
@@ -91,7 +91,8 @@ func main() {
 
 # 案例项目
 
-[A Linux Host-based Intrusion Detection System based on eBPF.](https://github.com/ehids/ehids)
+* eCapture : [capture SSL/TLS text content without CA cert by eBPF.](https://github.com/ehids/ecapture)
+* eHIDS-Agent : [A Linux Host-based Intrusion Detection System based on eBPF.](https://github.com/ehids/ehids-agent)
 
 # 注意
 

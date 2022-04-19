@@ -73,7 +73,7 @@ type Probe struct {
 	manualLoadNeeded   bool
 	checkPin           bool
 	funcName           string //目标hook对象的函数名；uprobe中，若为空，则使用offset。
-	attachPID          int
+	AttachPID          int    // pid to attach, only for uprobe .
 	attachRetryAttempt uint
 
 	// lastError - stores the last error that the probe encountered, it is used to surface a more useful error message
@@ -563,7 +563,7 @@ func (p *Probe) reset() {
 	p.manualLoadNeeded = false
 	p.checkPin = false
 	p.funcName = ""
-	p.attachPID = 0
+	p.AttachPID = 0
 	p.attachRetryAttempt = 0
 }
 
@@ -581,7 +581,6 @@ func (p *Probe) attachKprobe() error {
 		// this might actually be a Uprobe
 		return p.attachUprobe()
 	}
-	p.attachPID = os.Getpid()
 
 	var kp link.Link
 	if isRet {
@@ -617,7 +616,6 @@ func (p *Probe) attachTracepoint() error {
 
 // attachUprobe - Attaches the probe to its Uprobe
 func (p *Probe) attachUprobe() error {
-	p.attachPID = os.Getpid()
 	// Prepare uprobe_events line parameters
 	//var funcName string
 	var isRet bool
@@ -642,8 +640,9 @@ func (p *Probe) attachUprobe() error {
 	}
 	opts := &link.UprobeOptions{
 		Offset: p.UprobeOffset,
-		//PID:    p.attachPID,
+		PID:    p.AttachPID,
 	}
+
 	var kp link.Link
 	if isRet {
 		kp, err = ex.Uretprobe(p.funcName, p.program, opts)

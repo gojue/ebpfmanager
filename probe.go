@@ -584,9 +584,9 @@ func (p *Probe) attachKprobe() error {
 
 	var kp link.Link
 	if isRet {
-		kp, err = link.Kretprobe(funcName, p.program)
+		kp, err = link.Kretprobe(funcName, p.program, nil)
 	} else {
-		kp, err = link.Kprobe(funcName, p.program)
+		kp, err = link.Kprobe(funcName, p.program, nil)
 	}
 
 	if err != nil {
@@ -606,7 +606,7 @@ func (p *Probe) attachTracepoint() error {
 	category := traceGroup[1]
 	name := traceGroup[2]
 
-	kp, err := link.Tracepoint(category, name, p.program)
+	kp, err := link.Tracepoint(category, name, p.program, nil)
 	if err != nil {
 		return errors.New(fmt.Sprintf("error:%v , couldn's activate tracepoint %s, matchFuncName:%s", err, p.Section, p.EbpfFuncName))
 	}

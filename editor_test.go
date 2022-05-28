@@ -29,7 +29,7 @@ func ExampleEditor_rewriteConstant() {
 		asm.Return(),
 	}
 
-	insns[0].Reference = "my_ret"
+	insns[0].WithReference("my_ret")
 
 	editor := Edit(&insns)
 	if err := editor.RewriteConstant("my_ret", 42); err != nil {
@@ -90,7 +90,7 @@ func TestEditorIssue59(t *testing.T) {
 		asm.Return().Sym("exit"),
 	}
 
-	insns[0].Reference = "my_ret"
+	insns[0].WithReference("my_ret")
 
 	editor := Edit(&insns)
 	if err := editor.RewriteConstant("my_ret", max); err != nil {

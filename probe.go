@@ -719,7 +719,7 @@ func (p *Probe) attachTCCLS() error {
 	err = ntl.rtNetlink.Qdisc().Add(qdisc)
 	if err != nil {
 		if err.Error() != "netlink receive: file exists" {
-			return errors.New(fmt.Sprintf("error:%v , couldn't add a \", err clsact\" qdisc to interface %v", p.Ifindex))
+			return errors.New(fmt.Sprintf("error:%v , couldn't add a \", err clsact\" qdisc to interface %v", err, p.Ifindex))
 		}
 	}
 

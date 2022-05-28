@@ -42,6 +42,11 @@ func ExampleEditor_rewriteConstant() {
 }
 
 func TestEditorRewriteConstant(t *testing.T) {
+
+	if err := rlimit.RemoveMemlock(); err != nil {
+		t.Fatal(err)
+	}
+
 	spec, err := ebpf.LoadCollectionSpec("testdata/rewrite.elf")
 	if err != nil {
 		t.Fatal(err)

@@ -346,7 +346,7 @@ func (m *Manager) GetMapSpec(name string) (*ebpf.MapSpec, bool, error) {
 }
 
 // editMapSpec -
-func (m *Manager) editMapSpec(name string, mapSpec *ebpf.MapSpec) (error) {
+func (m *Manager) editMapSpec(name string, mapSpec *ebpf.MapSpec) error {
 	m.stateLock.RLock()
 	defer m.stateLock.RUnlock()
 	if m.collectionSpec == nil || m.state < initialized {
@@ -919,7 +919,7 @@ func (m *Manager) CloneProgram(UID string, newProbe Probe, constantsEditors []Co
 	}
 
 	// Init
-	if err = newProbe.InitWithOptions(m, true, true); err != nil {
+	if err = newProbe.InitWithOptions(m, false, true); err != nil {
 		// clean up
 		_ = newProbe.Stop()
 		return errors.New(fmt.Sprintf("error:%v , failed to initialize new probe %v", err, newProbe.GetIdentificationPair()))
@@ -1256,8 +1256,8 @@ func (m *Manager) editConstant(prog *ebpf.ProgramSpec, editor ConstantEditor) er
 // rewriteMaps - Rewrite the provided program spec with the provided maps
 func (m *Manager) rewriteMaps(program *ebpf.ProgramSpec, eBPFMaps map[string]*ebpf.Map) error {
 	for symbol, eBPFMap := range eBPFMaps {
-		fd := eBPFMap.FD()
-		err := program.Instructions.RewriteMapPtr(symbol, fd)
+		//fd := eBPFMap.FD()
+		err := program.Instructions.AssociateMap(symbol, eBPFMap)
 		if err != nil {
 			return errors.New(fmt.Sprintf("error:%v , couldn't rewrite map %s", err, symbol))
 		}

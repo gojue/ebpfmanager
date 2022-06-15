@@ -28,10 +28,12 @@ jobs:
           done
           go get -u github.com/shuLhan/go-bindata/...
         shell: bash
+      - name: Network Interface
+        run: |
+          ip -4 route show
+          ip -o -4 route show to default
       - name: Test
         run: |
           sudo go test -v .
           cd examples/
-          ip -o -4 route show to default | awk '{print $5}'
-          ip -4 route show
           sh test.sh

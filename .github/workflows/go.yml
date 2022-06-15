@@ -32,4 +32,6 @@ jobs:
         run: |
           sudo go test -v .
           cd examples/
+          ip -o -4 route show to default | awk '{print $5}'
+          ip -4 route show
           sh test.sh

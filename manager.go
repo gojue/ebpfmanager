@@ -919,7 +919,7 @@ func (m *Manager) CloneProgram(UID string, newProbe *Probe, constantsEditors []C
 	}
 
 	// Init
-	if err = newProbe.InitWithOptions(m, false, true); err != nil {
+	if err = newProbe.InitWithOptions(m, true, true); err != nil {
 		// clean up
 		_ = newProbe.Stop()
 		return errors.New(fmt.Sprintf("error:%v , failed to initialize new probe %v", err, newProbe.GetIdentificationPair()))

@@ -11,15 +11,24 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
+      - uses: actions/checkout@v3
 
-    - name: Set up Go
-      uses: actions/setup-go@v3
-      with:
-        go-version: 1.18
-
-    - name: Test
-      run: |
-        sudo go test -v .
-        cd examples/
-        sh test.sh
+      - name: Set up Go
+        uses: actions/setup-go@v3
+        with:
+          go-version: 1.18
+      - name: Install Compilers
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes build-essential pkgconf libelf-dev llvm-12 clang-12 linux-tools-common linux-tools-generic
+          for tool in "clang" "llc" "llvm-strip"
+          do
+            sudo rm -f /usr/bin/$tool
+            sudo ln -s /usr/bin/$tool-12 /usr/bin/$tool
+          done
+        shell: bash
+      - name: Test
+        run: |
+          sudo go test -v .
+          cd examples/
+          sh test.sh

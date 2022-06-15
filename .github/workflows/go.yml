@@ -26,6 +26,7 @@ jobs:
             sudo rm -f /usr/bin/$tool
             sudo ln -s /usr/bin/$tool-12 /usr/bin/$tool
           done
+          go get -u github.com/shuLhan/go-bindata/...
         shell: bash
       - name: Test
         run: |

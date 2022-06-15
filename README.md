@@ -6,13 +6,13 @@
 ebpfmanager参照datadog/ebpf/manager包的思想，基于cilium/ebpf实现的ebpf类库封装。
 
 相比`cilium/ebpf`实现配置化，自动加载，更具备面向对象思想，且实现了`probe`颗粒的卡开启关闭功能。 相比`datadog/ebpf`，实现了依赖包方式加载`cilium/ebpf`
-，而非fork方式，这点与其期望走的方向一致。且依赖`cilium/ebpf`版本更新到最新v0.8.1。
+，而非fork方式，这点与其期望走的方向一致。且依赖`cilium/ebpf`版本更新到最新v0.9.0。
 >Work is underway to convert this library to wrap the upstream library, rather than forking.
 
 
 # 依赖
 
-* [cilium/ebpf v0.8.1](https://github.com/cilium/ebpf/releases/tag/v0.8.1)    22 Feb, 2022
+* [cilium/ebpf v0.9.0](https://github.com/cilium/ebpf/releases/tag/v0.9.0)    2022-06-16
 * [go-bindata](https://github.com/shuLhan/go-bindata/cmd/go-bindata)  用于生成ebpf字节码文件的go包，与`go:embed`类似。
 ```shell
 go get -d github.com/shuLhan/go-bindata/cmd/go-bindata
@@ -91,7 +91,7 @@ func main() {
 
 # 案例项目
 
-* eCapture : [capture SSL/TLS text content without CA cert by eBPF.](https://github.com/ehids/ecapture)
+* eCapture : [capture SSL/TLS text content without CA cert using eBPF.](https://github.com/ehids/ecapture)
 * eHIDS-Agent : [A Linux Host-based Intrusion Detection System based on eBPF.](https://github.com/ehids/ehids-agent)
 
 # 注意

@@ -19,4 +19,6 @@ jobs:
         go-version: 1.18
 
     - name: Test
-      run: sudo go test -v ./...
+      run: sudo go test -v .
+        examples/
+        sh test.sh

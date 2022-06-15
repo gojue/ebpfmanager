@@ -52,7 +52,7 @@ func TestEditorRewriteConstant(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	progSpec := spec.Programs["socket"]
+	progSpec := spec.Programs["rewrite"]
 	editor := Edit(&progSpec.Instructions)
 
 	if err := editor.RewriteConstant("constant", 0x01); err != nil {
@@ -91,7 +91,7 @@ func TestEditorIssue59(t *testing.T) {
 		asm.Mov.Imm(asm.R0, 1),
 		asm.JGT.Imm(asm.R1, 0, "exit"),
 		asm.Mov.Imm(asm.R0, 0),
-		asm.Return().Sym("exit"),
+		asm.Return().WithSymbol("exit"),
 	}
 
 	editor := Edit(&insns)

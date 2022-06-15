@@ -39,7 +39,7 @@ build-prog2:
 		-c -o - | llc -march=bpf -filetype=obj -o ebpf/bin/probe2.o
 
 build:
-	go-bindata -pkg main -prefix "ebpf/bin" -o "probe.go" "ebpf/bin/probe1.o" "ebpf/bin/probe2.o"
+	go run github.com/shuLhan/go-bindata/cmd/go-bindata -pkg main -prefix "ebpf/bin" -o "probe.go" "ebpf/bin/probe1.o" "ebpf/bin/probe2.o"
 	go build -o bin/main .
 
 run:

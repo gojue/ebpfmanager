@@ -21,5 +21,5 @@ jobs:
     - name: Test
       run: |
         sudo go test -v .
-        examples/
+        cd examples/
         sh test.sh

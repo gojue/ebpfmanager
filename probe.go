@@ -443,6 +443,8 @@ func (p *Probe) attach() error {
 		err = p.attachTCCLS()
 	case ebpf.XDP:
 		err = p.attachXDP()
+	case ebpf.RawTracepoint:
+		err = p.attachRawTracepoint()
 	default:
 		err = fmt.Errorf("program type %s not implemented yet", p.programSpec.Type)
 	}
@@ -806,4 +808,18 @@ func (p *Probe) detachXDP() error {
 		return nil
 	}
 	return errors.New(fmt.Sprintf("error:%v , couldn't detach XDP program %v from interface %v", err, p.GetIdentificationPair(), p.Ifindex))
+}
+
+// attachRawTracepoint - Attaches the probe to its raw_tracepoint
+func (p *Probe) attachRawTracepoint() error {
+	name := strings.TrimLeft(p.Section ,"raw_tracepoint/")
+	link, err := link.AttachRawTracepoint(link.RawTracepointOptions{
+		Name:    name,
+		Program: p.program,
+	})
+	if err != nil {
+		return errors.New(fmt.Sprintf("error:%v , couldn's activate raw_tracepoint %s, matchFuncName:%s", err, p.Section, p.EbpfFuncName))
+	}
+	p.link = link
+	return nil
 }

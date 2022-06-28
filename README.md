@@ -100,3 +100,7 @@ func main() {
    ，这点不同于老版本。（老版本是以section名字作为索引）
 2. 在 [datadog/ebpf af587081](https://github.com/DataDog/ebpf/commit/af5870810f0b2c2f9ba996d02db16955de58266f)  Nov 17,
    2021 版本上实现本类库。
+
+# 感谢
+
+感谢 [https://jetbrains.com/](https://jetbrains.com/) 的 All Products Pack IDE使用授权。

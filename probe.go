@@ -165,6 +165,8 @@ type Probe struct {
 	// in mind that if you are hooking on the host side of a virtuel ethernet pair, Ingress and Egress are inverted.
 	NetworkDirection TrafficType
 
+	// SkipLoopback loopback devices are special, some tc probes should be skipped ,see https://github.com/aquasecurity/tracee/blob/fcdb1d6171ef75b22248253a51b581856328f75c/pkg/ebpf/probes/probes.go#L322 for more detail.
+	SkipLoopback bool
 	// tcObject - (TC classifier) TC object created when the classifier was attached. It will be reused to delete it on
 	// exit.
 	tcObject *tc.Object
@@ -366,6 +368,13 @@ func (p *Probe) init() error {
 			p.lastError = err
 			return errors.New(fmt.Sprintf("error:%v , couldn't find interface %v", err, p.Ifname))
 		}
+
+		// Check if interface is loopback
+		isNetIfaceLo := inter.Flags&net.FlagLoopback == net.FlagLoopback
+		if isNetIfaceLo && p.SkipLoopback {
+			return fmt.Errorf("error:%v , interface %v is loopback and SkipLoopback is set", ErrLoopbackDisabled, p.Ifname)
+		}
+
 		p.Ifindex = int32(inter.Index)
 	}
 
@@ -812,7 +821,7 @@ func (p *Probe) detachXDP() error {
 
 // attachRawTracepoint - Attaches the probe to its raw_tracepoint
 func (p *Probe) attachRawTracepoint() error {
-	name := strings.TrimLeft(p.Section ,"raw_tracepoint/")
+	name := strings.TrimLeft(p.Section, "raw_tracepoint/")
 	link, err := link.AttachRawTracepoint(link.RawTracepointOptions{
 		Name:    name,
 		Program: p.program,

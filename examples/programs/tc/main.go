@@ -12,6 +12,7 @@ var m = &manager.Manager{
 			EbpfFuncName:     "egress_cls_func",
 			Ifname:           "eth0", // change this to the interface connected to the internet
 			NetworkDirection: manager.Egress,
+			SkipLoopback:     true,
 		},
 		{
 			Section:          "classifier/ingress",

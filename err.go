@@ -26,4 +26,5 @@ var (
 	ErrMapInitialized          = errors.New("map already initialized")
 	ErrMapNotInitialized       = errors.New("the map must be initialized first")
 	ErrMapNotRunning           = errors.New("the map is not running")
+	ErrLoopbackDisabled        = errors.New("loopback is disabled")
 )

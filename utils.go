@@ -1,10 +1,12 @@
 package manager
 
 import (
+	"bufio"
 	"debug/elf"
 	"errors"
 	"fmt"
 	"io/ioutil"
+	"os"
 	"regexp"
 	"runtime"
 	"sort"
@@ -89,6 +91,9 @@ func GetSyscallFnName(name string) (string, error) {
 	return GetSyscallFnNameWithSymFile(name, defaultSymFile)
 }
 
+// cache of the symfile
+var kallsymsCache = make(map[string]bool)
+
 // GetSyscallFnNameWithSymFile - Returns the kernel function of the provided syscall, after reading symFile to retrieve
 // the list of symbols of the current kernel.
 func GetSyscallFnNameWithSymFile(name string, symFile string) (string, error) {
@@ -96,10 +101,30 @@ func GetSyscallFnNameWithSymFile(name string, symFile string) (string, error) {
 		symFile = defaultSymFile
 	}
 
-	//如果能直接找到
-	syscallName, err := getSyscallName(name, symFile)
-	if err == nil {
-		return syscallName, nil
+	// Get name from kallsyms cache
+	if len(kallsymsCache) == 0 {
+		file, err := os.Open(symFile)
+		if err != nil {
+			return "", err
+		}
+		defer file.Close()
+		// cache up the kallsyms for speed up
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			line := strings.Split(scanner.Text(), " ")
+			if len(line) < 3 {
+				continue
+			}
+			// only save symbol in text (code) section and weak symbol
+			// Reference: https://github.com/iovisor/bcc/pull/1540/files
+			if strings.ToLower(line[1]) == "t" || strings.ToLower(line[1]) == "w" {
+				kallsymsCache[line[2]] = true
+			}
+		}
+	}
+
+	if _, exist := kallsymsCache[name]; exist {
+		return name, nil
 	}
 
 	if syscallPrefix == "" {
@@ -140,44 +165,36 @@ func getSyscallFnNameWithKallsyms(name string, kallsymsContent string) (string, 
 	}
 	var b strings.Builder
 
-	regexStr := `(\b` + name + `\b)`
-	fnRegex := regexp.MustCompile(regexStr)
-	match := fnRegex.FindAllString(kallsymsContent, -1)
-	if len(match) > 0 {
-		b.WriteString(match[0])
-		return b.String(), nil
-	}
-
 	// We should search for new syscall function like "__x64__sys_open"
 	// Note the start of word boundary. Should return exactly one string
-	regexStr = `(\b__` + arch + `_[Ss]y[sS]_` + name + `\b)`
-	fnRegex = regexp.MustCompile(regexStr)
+	regexStr := `(\b__` + arch + `_[Ss]y[sS]_` + name + `\b)`
+	fnRegex := regexp.MustCompile(regexStr)
 
-	match = fnRegex.FindAllString(kallsymsContent, -1)
+	match := fnRegex.FindString(kallsymsContent)
 	if len(match) > 0 {
-		b.WriteString(match[0])
+		b.WriteString(match)
 		return b.String(), nil
 	}
 
 	// If nothing found, search for old syscall function to be sure
 	regexStr = `(\b[Ss]y[sS]_` + name + `\b)`
 	fnRegex = regexp.MustCompile(regexStr)
-	match = fnRegex.FindAllString(kallsymsContent, -1)
+	match = fnRegex.FindString(kallsymsContent)
 	// If we get something like 'sys_open' or 'SyS_open', return
 	// either (they have same addr) else, just return original string
 	if len(match) > 0 {
-		b.WriteString(match[0])
+		b.WriteString(match)
 		return b.String(), nil
 	}
 
 	// check for '__' prefixed functions, like '__sys_open'
 	regexStr = `(\b__[Ss]y[sS]_` + name + `\b)`
 	fnRegex = regexp.MustCompile(regexStr)
-	match = fnRegex.FindAllString(kallsymsContent, -1)
+	match = fnRegex.FindString(kallsymsContent)
 	// If we get something like '__sys_open' or '__SyS_open', return
 	// either (they have same addr) else, just return original string
 	if len(match) > 0 {
-		b.WriteString(match[0])
+		b.WriteString(match)
 		return b.String(), nil
 	}
 

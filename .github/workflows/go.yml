@@ -34,6 +34,6 @@ jobs:
           ip -o -4 route show to default
       - name: Test
         run: |
-          sudo go test -v .
+          go test -exec sudo ./...
           cd examples/
           sh test.sh

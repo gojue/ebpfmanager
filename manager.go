@@ -1169,7 +1169,7 @@ func (m *Manager) UpdateActivatedProbes(selectors []ProbesSelector) error {
 func (m *Manager) editConstants() error {
 	// Start with the BTF based solution
 	rodata := m.collectionSpec.Maps[".rodata"]
-	if rodata != nil && rodata.BTF != nil {
+	if rodata != nil && rodata.Key != nil && rodata.Value != nil {
 		consts := map[string]interface{}{}
 		for _, editor := range m.options.ConstantEditors {
 			consts[editor.Name] = editor.Value

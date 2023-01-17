@@ -4,6 +4,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/ehids/ebpfmanager"
+	_ "github.com/shuLhan/go-bindata"
 )
 
 var m = &manager.Manager{

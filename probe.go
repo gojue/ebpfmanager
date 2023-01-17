@@ -37,13 +37,30 @@ const (
 	XdpAttachModeDrv XdpAttachMode = 1 << 2
 	// XdpAttachModeHw suitable for NICs with hardware XDP support
 	XdpAttachModeHw XdpAttachMode = 1 << 3
+	// DefaultTCFilterPriority is the default TC filter priority if none were given
+	DefaultTCFilterPriority = 50
 )
 
-type TrafficType uint32
+type TrafficType uint16
+
+func (tt TrafficType) String() string {
+	switch tt {
+	case Ingress:
+		return "ingress"
+	case Egress:
+		return "egress"
+	default:
+		return fmt.Sprintf("TrafficType(%d)", tt)
+	}
+}
 
 const (
-	Ingress = TrafficType(tc.HandleMinIngress)
-	Egress  = TrafficType(tc.HandleMinEgress)
+	Ingress          = TrafficType(tc.HandleMinIngress)
+	Egress           = TrafficType(tc.HandleMinEgress)
+	clsactQdisc      = uint16(netlink.HANDLE_INGRESS >> 16)
+	UnknownProbeType = ""
+	ProbeType        = "p"
+	RetProbeType     = "r"
 )
 
 type ProbeIdentificationPair struct {
@@ -67,7 +84,10 @@ type Probe struct {
 	manager            *Manager
 	program            *ebpf.Program
 	programSpec        *ebpf.ProgramSpec
+	attachPID          int
 	link               link.Link
+	tcFilter           netlink.BpfFilter
+	tcClsActQdisc      netlink.Qdisc
 	state              state
 	stateLock          sync.RWMutex
 	manualLoadNeeded   bool
@@ -75,6 +95,19 @@ type Probe struct {
 	funcName           string //目标hook对象的函数名；uprobe中，若为空，则使用offset。
 	AttachPID          int    // pid to attach, only for uprobe .
 	attachRetryAttempt uint
+
+	// TCFilterHandle - (TC classifier) defines the handle to use when loading the classifier. Leave unset to let the kernel decide which handle to use.
+	TCFilterHandle uint32
+
+	// TCFilterPrio - (TC classifier) defines the priority of the classifier added to the clsact qdisc. Defaults to DefaultTCFilterPriority.
+	TCFilterPrio uint16
+
+	// TCCleanupQDisc - (TC classifier) defines if the manager should cleanup the clsact qdisc when a probe is unloaded
+	TCCleanupQDisc bool
+
+	// TCFilterProtocol - (TC classifier) defines the protocol to match in order to trigger the classifier. Defaults to
+	// ETH_P_ALL.
+	TCFilterProtocol uint16
 
 	// lastError - stores the last error that the probe encountered, it is used to surface a more useful error message
 	// when one of the validators (see Options.ActivatedProbes) fails.
@@ -610,9 +643,9 @@ func (p *Probe) attachKprobe() error {
 // attachTracepoint - Attaches the probe to its tracepoint
 func (p *Probe) attachTracepoint() error {
 	// Parse section
-	traceGroup := strings.SplitN(p.Section, "/", 3)
+	traceGroup := strings.SplitN(p.programSpec.SectionName, "/", 3)
 	if len(traceGroup) != 3 {
-		return fmt.Errorf("error:%v, expected SEC(\"tracepoint/[category]/[name]\") got %s", ErrSectionFormat, p.Section)
+		return fmt.Errorf("error:%v, expected SEC(\"tracepoint/[category]/[name]\") got %s", ErrSectionFormat, p.programSpec.SectionName)
 	}
 	category := traceGroup[1]
 	name := traceGroup[2]
@@ -692,6 +725,45 @@ func (p *Probe) attachSocket() error {
 // detachSocket - Detaches the probe from its socket
 func (p *Probe) detachSocket() error {
 	return sockDetach(p.SocketFD, p.program.FD())
+}
+
+func (p *Probe) buildTCClsActQdisc() netlink.Qdisc {
+	if p.tcClsActQdisc == nil {
+		p.tcClsActQdisc = &netlink.GenericQdisc{
+			QdiscType: "clsact",
+			QdiscAttrs: netlink.QdiscAttrs{
+				LinkIndex: int(p.Ifindex),
+				Handle:    netlink.MakeHandle(0xffff, 0),
+				Parent:    netlink.HANDLE_INGRESS,
+			},
+		}
+	}
+	return p.tcClsActQdisc
+}
+func (p *Probe) getTCFilterParentHandle() uint32 {
+	return netlink.MakeHandle(clsactQdisc, uint16(p.NetworkDirection))
+}
+func (p *Probe) buildTCFilter() (netlink.BpfFilter, error) {
+	if p.tcFilter.FilterAttrs.LinkIndex == 0 {
+		var filterName string
+		filterName, err := generateTCFilterName(p.UID, p.programSpec.SectionName, p.attachPID)
+		if err != nil {
+			return p.tcFilter, fmt.Errorf("couldn't create TC filter for %v: %w", p.EbpfFuncName, err)
+		}
+		p.tcFilter = netlink.BpfFilter{
+			FilterAttrs: netlink.FilterAttrs{
+				LinkIndex: int(p.Ifindex),
+				Parent:    p.getTCFilterParentHandle(),
+				Handle:    p.TCFilterHandle,
+				Priority:  p.TCFilterPrio,
+				Protocol:  p.TCFilterProtocol,
+			},
+			Fd:           p.program.FD(),
+			Name:         filterName,
+			DirectAction: true,
+		}
+	}
+	return p.tcFilter, nil
 }
 
 // attachTCCLS - Attaches the probe to its TC classifier hook point

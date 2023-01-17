@@ -27,4 +27,5 @@ var (
 	ErrMapNotInitialized       = errors.New("the map must be initialized first")
 	ErrMapNotRunning           = errors.New("the map is not running")
 	ErrLoopbackDisabled        = errors.New("loopback is disabled")
+	ErrMissingEditorFlags      = errors.New("missing editor flags in map editor")
 )

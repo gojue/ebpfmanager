@@ -80,6 +80,7 @@ const (
 	EditType       MapSpecEditorFlag = 1 << 1
 	EditMaxEntries MapSpecEditorFlag = 1 << 2
 	EditFlags      MapSpecEditorFlag = 1 << 3
+	EditInnerMap   MapSpecEditorFlag = 1 << 4
 )
 
 // MapSpecEditor - A MapSpec editor defines how specific parameters of specific maps should be updated at runtime
@@ -214,6 +215,12 @@ type Options struct {
 	// RLimit - The maps & programs provided to the manager might exceed the maximum allowed memory lock.
 	// (RLIMIT_MEMLOCK) If a limit is provided here it will be applied when the manager is initialized.
 	RLimit *unix.Rlimit
+
+	// KeepKernelBTF - Defines if the kernel types defined in VerifierOptions.Programs.KernelTypes should be cleaned up
+	// once the manager is done using them. By default, the manager will clean them up to save up space. DISCLAIMER: if
+	// your program uses "manager.CloneProgram", you might want to enable "KeepKernelBTF". As a workaround, you can also
+	// try to strip as much as possible the content of "KernelTypes" to reduce the memory overhead.
+	KeepKernelBTF bool
 }
 
 // netlinkCacheKey - (TC classifier programs only) Key used to recover the netlink cache of an interface
@@ -562,6 +569,10 @@ func (m *Manager) Start() error {
 		return nil
 	}
 
+	if !m.options.KeepKernelBTF {
+		// release kernel BTF. It should no longer be needed
+		m.options.VerifierOptions.Programs.KernelTypes = nil
+	}
 	// clean up tracefs TODO 作用是什么？
 
 	// Start perf ring readers
@@ -1220,6 +1231,9 @@ func (m *Manager) editMapSpecs() error {
 		if !exists {
 			return errors.New(fmt.Sprintf("error:%v , failed to edit maps/%s: couldn't find map", ErrUnknownMap, name))
 		}
+		if mapEditor.EditorFlag == 0 {
+			return fmt.Errorf("failed to edit maps/%s: %w", name, ErrMissingEditorFlags)
+		}
 		if EditType&mapEditor.EditorFlag == EditType {
 			spec.Type = mapEditor.Type
 		}
@@ -1230,9 +1244,11 @@ func (m *Manager) editMapSpecs() error {
 			spec.Flags = mapEditor.Flags
 		}
 
-		// InnerMap  替换
-		if mapEditor.InnerMap != nil {
-			spec.InnerMap = mapEditor.InnerMap
+		if EditInnerMap&mapEditor.EditorFlag == EditInnerMap {
+			// InnerMap  替换
+			if mapEditor.InnerMap != nil {
+				spec.InnerMap = mapEditor.InnerMap
+			}
 		}
 	}
 	return nil

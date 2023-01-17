@@ -1,12 +1,11 @@
 package main
 
 import (
+	"github.com/cilium/ebpf"
+	"github.com/ehids/ebpfmanager"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
 	"math"
-
-	"github.com/ehids/ebpfmanager"
-	"github.com/cilium/ebpf"
 )
 
 var m = &manager.Manager{}
@@ -14,8 +13,8 @@ var m = &manager.Manager{}
 func main() {
 	options := manager.Options{
 		MapSpecEditors: map[string]manager.MapSpecEditor{
-			"cache": manager.MapSpecEditor{
-				Type: ebpf.LRUHash,
+			"cache": {
+				Type:       ebpf.LRUHash,
 				MaxEntries: 1000000,
 				EditorFlag: manager.EditMaxEntries | manager.EditType,
 			},

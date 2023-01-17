@@ -15,13 +15,13 @@ import (
 //
 // The C should look something like this:
 //
-//    #define LOAD_CONSTANT(param, var) asm("%0 = " param " ll" : "=r"(var))
+//	#define LOAD_CONSTANT(param, var) asm("%0 = " param " ll" : "=r"(var))
 //
-//    int xdp() {
-//        bool my_constant;
-//        LOAD_CONSTANT("SYMBOL_NAME", my_constant);
+//	int xdp() {
+//	    bool my_constant;
+//	    LOAD_CONSTANT("SYMBOL_NAME", my_constant);
 //
-//        if (my_constant) ...
+//	    if (my_constant) ...
 func ExampleEditor_rewriteConstant() {
 	// This assembly is roughly equivalent to what clang
 	// would emit for the C above.
@@ -71,7 +71,7 @@ func TestEditorRewriteConstant(t *testing.T) {
 	}
 	defer prog.Close()
 
-	ret, _, err := prog.Test(make([]byte, 14))
+	ret, _, err := prog.Test(make([]byte, 15))
 	if err != nil {
 		t.Fatal(err)
 	}

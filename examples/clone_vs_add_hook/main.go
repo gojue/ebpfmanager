@@ -1,9 +1,8 @@
 package main
 
 import (
+	"github.com/gojue/ebpfmanager"
 	"github.com/sirupsen/logrus"
-
-	"github.com/ehids/ebpfmanager"
 )
 
 var m = &manager.Manager{

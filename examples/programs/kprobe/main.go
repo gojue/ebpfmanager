@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"github.com/ehids/ebpfmanager"
+	"github.com/gojue/ebpfmanager"
 	"github.com/sirupsen/logrus"
 	"os"
 	"os/signal"

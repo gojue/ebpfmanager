@@ -5,11 +5,11 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/sirupsen/logrus"
 
-	"github.com/ehids/ebpfmanager"
+	"github.com/gojue/ebpfmanager"
 )
 
 type TestData struct {
-	Input uint32
+	Input  uint32
 	Output uint32
 }
 

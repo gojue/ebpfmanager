@@ -2,13 +2,12 @@ package main
 
 import (
 	"fmt"
+	"github.com/gojue/ebpfmanager"
 	"os"
 	"os/signal"
 	"time"
 
 	"github.com/sirupsen/logrus"
-
-	"github.com/ehids/ebpfmanager"
 )
 
 var m1 = &manager.Manager{

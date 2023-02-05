@@ -1,5 +1,5 @@
 # 介绍
-[![](https://godoc.org/github.com/ehids/ebpfmanager?status.svg)](https://godoc.org/github.com/ehids/ebpfmanager)
+[![](https://godoc.org/github.com/gojue/ebpfmanager?status.svg)](https://godoc.org/github.com/gojue/ebpfmanager)
 
 ![HoneyGopher](./ehids-logo-1.png)
 
@@ -49,7 +49,7 @@ manager与probe是一对多关系。每个probe必须配置`Section`与`EbpfFunc
 package main
 
 import (
-	"github.com/ehids/ebpfmanager"
+	"github.com/gojue/ebpfmanager"
 	"github.com/sirupsen/logrus"
 )
 

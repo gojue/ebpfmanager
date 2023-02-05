@@ -5,7 +5,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/cilium/ebpf"
-	"github.com/ehids/ebpfmanager"
+	"github.com/gojue/ebpfmanager"
 )
 
 func demoMapEditor() error {

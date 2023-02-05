@@ -1,4 +1,4 @@
-module github.com/ehids/ebpfmanager
+module github.com/gojue/ebpfmanager
 
 go 1.18
 

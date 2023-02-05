@@ -13,11 +13,11 @@
 - Add GitHub Actions (codeQL \ go-test)
 -
 
-fixed [#10 type 'Probe' contains 'sync.RWMutex' which is 'sync.Locker'](https://github.com/ehids/ebpfmanager/issues/10)
+fixed [#10 type 'Probe' contains 'sync.RWMutex' which is 'sync.Locker'](https://github.com/gojue/ebpfmanager/issues/10)
 
 <hr>
 
 ## v0.2.3 (2022-04-09)
 
-- Fix. [#1 GetSyscallFnNameWithSymFile memory leak](https://github.com/ehids/ebpfmanager/pull/2)
+- Fix. [#1 GetSyscallFnNameWithSymFile memory leak](https://github.com/gojue/ebpfmanager/pull/2)
 - Fix format type error.

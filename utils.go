@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 type state uint
@@ -97,6 +98,7 @@ func GetSyscallFnName(name string) (string, error) {
 
 // cache of the symfile
 var kallsymsCache = make(map[string]bool)
+var kallSymsLocker = sync.Mutex{}
 
 // GetSyscallFnNameWithSymFile - Returns the kernel function of the provided syscall, after reading symFile to retrieve
 // the list of symbols of the current kernel.
@@ -122,12 +124,18 @@ func GetSyscallFnNameWithSymFile(name string, symFile string) (string, error) {
 			// only save symbol in text (code) section and weak symbol
 			// Reference: https://github.com/iovisor/bcc/pull/1540/files
 			if strings.ToLower(line[1]) == "t" || strings.ToLower(line[1]) == "w" {
+				kallSymsLocker.Lock()
 				kallsymsCache[line[2]] = true
+				kallSymsLocker.Unlock()
 			}
 		}
 	}
 
-	if _, exist := kallsymsCache[name]; exist {
+	kallSymsLocker.Lock()
+	_, exist := kallsymsCache[name];
+	kallSymsLocker.Unlock()
+
+	if exist {
 		return name, nil
 	}
 

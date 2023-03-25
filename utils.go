@@ -132,7 +132,7 @@ func GetSyscallFnNameWithSymFile(name string, symFile string) (string, error) {
 	}
 
 	kallSymsLocker.Lock()
-	_, exist := kallsymsCache[name];
+	_, exist := kallsymsCache[name]
 	kallSymsLocker.Unlock()
 
 	if exist {
@@ -158,7 +158,7 @@ const defaultSymFile = "/proc/kallsyms"
 // for older syscall functions to run on newer kernels
 func getSyscallName(name string, symFile string) (string, error) {
 	// Get kernel symbols
-	syms, err := ioutil.ReadFile(symFile)
+	syms, err := os.ReadFile(symFile)
 	if err != nil {
 		return "", err
 	}

@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -30,4 +31,17 @@ func TestGenerateEventName(t *testing.T) {
 	if err == nil {
 		t.Errorf("Test should failed as event name length is too big for the kernel and free space for function Name is < %d", minFunctionNameLen)
 	}
+}
+
+func TestGetSyscallFnNameWithSymFile(t *testing.T) {
+	expectedFnName := "sys_exit"
+
+	fnName, err := GetSyscallFnNameWithSymFile(expectedFnName, "")
+	if err != nil {
+		t.Error(err)
+	}
+	if !strings.HasSuffix(fnName, expectedFnName) {
+		t.Errorf("Expected function name %s, but got %s", expectedFnName, fnName)
+	}
+	t.Logf("Expected function name %s, got %s", expectedFnName, fnName)
 }

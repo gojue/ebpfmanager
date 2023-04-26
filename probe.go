@@ -373,24 +373,16 @@ func (p *Probe) init() error {
 	}
 
 	// Find function name match if required
-	var kProbe = false
 	if strings.HasPrefix(p.Section, "kretprobe/") || (strings.HasPrefix(p.Section, "kprobe/")) {
-		var err error
-		p.funcName, err = FindFilterFunction(p.Section)
-		if err != nil {
-			p.lastError = err
-			return err
-		}
-		kProbe = true
-	}
-
-	if kProbe {
 		// Update syscall function name with the correct arch prefix
-		var err error
 		p.funcName, err = GetSyscallFnNameWithSymFile(p.AttachToFuncName, p.manager.options.SymFile)
 		if err != nil {
 			p.lastError = err
-			return err
+			p.funcName, err = FindFilterFunction(p.Section)
+			if err != nil {
+				p.lastError = err
+				return err
+			}
 		}
 	}
 

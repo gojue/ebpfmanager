@@ -5,7 +5,6 @@ import (
 	"debug/elf"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"regexp"
 	"runtime"
@@ -56,7 +55,7 @@ func FindFilterFunction(funcName string) (string, error) {
 
 	// Cache available filter functions if necessary
 	if len(availableFilterFunctions) == 0 {
-		funcs, err := ioutil.ReadFile("/sys/kernel/debug/tracing/available_filter_functions")
+		funcs, err := os.ReadFile("/sys/kernel/debug/tracing/available_filter_functions")
 		if err != nil {
 			return "", err
 		}

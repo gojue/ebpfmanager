@@ -157,10 +157,13 @@ type Probe struct {
 	// enabled, this is max(10, 2*NR_CPUS); otherwise, it is NR_CPUS. For kprobes, maxactive is ignored.
 	KProbeMaxActive int
 
-	// UprobeOffset - If UprobeOffset is provided, the uprobe will be attached to it directly without looking for the
-	// symbol in the elf binary. If the file is a non-PIE executable, the provided address must be a virtual address,
-	// otherwise it must be an offset relative to the file load address.
+	// UprobeOffset - this field changed from being an absolute offset to being relative to Address.
+	//	Now, It's a relative value
 	UprobeOffset uint64
+
+	// UAddress Symbol address. Must be provided in case of external symbols (shared libs).
+	// same as UprobeOptions.Address in cilium/ebpf
+	UAddress uint64
 
 	// ProbeRetry - Defines the number of times that the probe will retry to attach / detach on error.
 	ProbeRetry uint
@@ -665,18 +668,16 @@ func (p *Probe) attachUprobe() error {
 		return fmt.Errorf("error:%v, program type unrecognized in section %v", ErrSectionFormat, p.Section)
 	}
 
-	// compute the offset if it was not provided
-	if p.UprobeOffset == 0 {
-		p.funcName = p.AttachToFuncName
-	}
+	p.funcName = p.AttachToFuncName
 
 	ex, err := link.OpenExecutable(p.BinaryPath)
 	if err != nil {
 		return errors.New(fmt.Sprintf("error:%v , couldn't enable uprobe %s", err, p.EbpfFuncName))
 	}
 	opts := &link.UprobeOptions{
-		Offset: p.UprobeOffset,
-		PID:    p.AttachPID,
+		Offset:  p.UprobeOffset,
+		Address: p.UAddress,
+		PID:     p.AttachPID,
 	}
 
 	var kp link.Link
@@ -686,7 +687,7 @@ func (p *Probe) attachUprobe() error {
 		kp, err = ex.Uprobe(p.funcName, p.program, opts)
 	}
 	if err != nil {
-		return fmt.Errorf("opening uprobe: %s , isRet:%t", err, isRet)
+		return fmt.Errorf("opening uprobe: %s , isRet:%t, opts:%v", err, isRet, opts)
 	}
 	p.link = kp
 	return nil

@@ -163,6 +163,8 @@ type Probe struct {
 
 	// UAddress Symbol address. Must be provided in case of external symbols (shared libs).
 	// same as UprobeOptions.Address in cilium/ebpf
+	// offset的含义变为相对偏移量，会自动跟symbol name的地址相加，作为真正hook的地址。
+	// address参数也就是不需要类库再计算的绝对地址，即等于上面二者只和。 优先级最高。
 	UAddress uint64
 
 	// ProbeRetry - Defines the number of times that the probe will retry to attach / detach on error.

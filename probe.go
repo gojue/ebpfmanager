@@ -474,7 +474,7 @@ func (p *Probe) attach() error {
 		err = p.attachKprobe()
 	case ebpf.TracePoint:
 		err = p.attachTracepoint()
-	case ebpf.CGroupDevice, ebpf.CGroupSKB, ebpf.CGroupSock, ebpf.CGroupSockAddr, ebpf.CGroupSockopt, ebpf.CGroupSysctl:
+	case ebpf.CGroupDevice, ebpf.CGroupSKB, ebpf.CGroupSock, ebpf.SockOps, ebpf.CGroupSockAddr, ebpf.CGroupSockopt, ebpf.CGroupSysctl:
 		err = p.attachCGroup()
 	case ebpf.SocketFilter:
 		err = p.attachSocket()
@@ -697,15 +697,14 @@ func (p *Probe) attachUprobe() error {
 
 // attachCGroup - Attaches the probe to a cgroup hook point
 func (p *Probe) attachCGroup() error {
-
 	opts := link.CgroupOptions{
 		Path:    p.CGroupPath,
-		Attach:  ebpf.AttachCGroupInetEgress,
+		Attach:  p.programSpec.AttachType,
 		Program: p.program,
 	}
 	kp, err := link.AttachCgroup(opts)
 	if err != nil {
-		return errors.New(fmt.Sprintf("error:%v , failed to attach probe %v to cgroup %s", err, p.GetIdentificationPair(), p.CGroupPath))
+		return errors.New(fmt.Sprintf("error:%v , failed to attach probe %v to cgroup %s, attach type:%s", err, p.GetIdentificationPair(), p.CGroupPath, p.programSpec.AttachType.String()))
 	}
 
 	p.link = kp

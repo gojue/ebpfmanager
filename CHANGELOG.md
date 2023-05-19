@@ -1,7 +1,7 @@
 <hr>
 
 # v0.4.3 (2023-05-19)
-
+* feat: support SockOps eBPF program.
 **Full Changelog**: https://github.com/gojue/ebpfmanager/compare/v0.4.2...v0.4.3
 
 

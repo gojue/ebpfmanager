@@ -1,5 +1,12 @@
 <hr>
 
+# v0.4.3 (2023-05-19)
+
+**Full Changelog**: https://github.com/gojue/ebpfmanager/compare/v0.4.2...v0.4.3
+
+
+<hr>
+
 # v0.4.2 (2023-04-29)
 
 ## What's Changed

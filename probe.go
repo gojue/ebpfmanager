@@ -697,6 +697,10 @@ func (p *Probe) attachUprobe() error {
 
 // attachCGroup - Attaches the probe to a cgroup hook point
 func (p *Probe) attachCGroup() error {
+	if p.CGroupPath == "" {
+		return errors.New("CGroupPath cant be empty.")
+	}
+
 	opts := link.CgroupOptions{
 		Path:    p.CGroupPath,
 		Attach:  p.programSpec.AttachType,

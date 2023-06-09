@@ -60,7 +60,6 @@ var m = &manager.Manager{
 			EbpfFuncName:     "uprobe_readline",
 			AttachToFuncName: "readline",
 			BinaryPath:       "/usr/bin/bash",
-            UID:              "uprobe_readline_bash",
 		},
 	},
 }
@@ -92,7 +91,7 @@ func main() {
 
 # 案例项目
 
-* eCapture : [capture SSL/TLS text content without CA cert using eBPF.](https://github.com/gojue/ecapture)
+* eCapture : [capture SSL/TLS text content without CA cert using eBPF.](https://github.com/ehids/ecapture)
 * eHIDS-Agent : [A Linux Host-based Intrusion Detection System based on eBPF.](https://github.com/ehids/ehids-agent)
 
 # 注意

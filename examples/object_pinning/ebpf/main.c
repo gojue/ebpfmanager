@@ -7,7 +7,6 @@ struct bpf_map_def SEC("maps/map1") map1 = {
     .key_size = sizeof(u32),
     .value_size = sizeof(u32),
     .max_entries = 10,
-    .pinning = LIBBPF_PIN_BY_NAME ,
 };
 
 struct bpf_map_def SEC("maps/map2") map2 = {

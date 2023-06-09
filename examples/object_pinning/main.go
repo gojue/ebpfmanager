@@ -2,9 +2,8 @@ package main
 
 import (
 	"flag"
-	"github.com/sirupsen/logrus"
-
 	"github.com/gojue/ebpfmanager"
+	"github.com/sirupsen/logrus"
 )
 
 var m = &manager.Manager{

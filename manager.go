@@ -255,6 +255,8 @@ type Manager struct {
 
 	// PerfMaps - List of perf ring buffers handled by the manager
 	PerfMaps []*PerfMap
+
+	RingbufMaps []*RingbufMap
 }
 
 // DumpMaps - Return a string containing human readable info about eBPF maps
@@ -585,6 +587,16 @@ func (m *Manager) Start() error {
 		}
 	}
 
+	// Start ring buf readers
+	for _, ringBuf := range m.RingbufMaps {
+		if err := ringBuf.Start(); err != nil {
+			// Clean up
+			m.Stop(CleanInternal)
+			m.stateLock.Unlock()
+			return err
+		}
+	}
+
 	// Attach eBPF programs
 	for _, probe := range m.Probes {
 		// ignore the error, they are already collected per probes and will be surfaced by the
@@ -643,6 +655,15 @@ func (m *Manager) stop(cleanup MapCleanupType) error {
 		e := perfRing.Stop(cleanup)
 		if e != nil {
 			e = errors.New(fmt.Sprintf("error:%v , perf ring reader %s couldn't gracefully shut down", perfRing.Stop(cleanup), perfRing.Name))
+		}
+		err = ConcatErrors(err, e)
+	}
+
+	// Stop ring buf readers
+	for _, ringBuf := range m.RingbufMaps {
+		e := ringBuf.Stop(cleanup)
+		if e != nil {
+			e = errors.New(fmt.Sprintf("error:%v , ring buf reader %s couldn't gracefully shut down", ringBuf.Stop(cleanup), ringBuf.Name))
 		}
 		err = ConcatErrors(err, e)
 	}
@@ -1341,6 +1362,13 @@ func (m *Manager) loadCollection() error {
 	// Initialize PerfMaps
 	for _, perfMap := range m.PerfMaps {
 		if err := perfMap.Init(m); err != nil {
+			return err
+		}
+	}
+
+	//Initialize ringbufmap
+	for _, ringbufMap := range m.RingbufMaps {
+		if err := ringbufMap.Init(m); err != nil {
 			return err
 		}
 	}

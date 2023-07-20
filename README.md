@@ -1,7 +1,6 @@
 # 介绍
 [![](https://godoc.org/github.com/gojue/ebpfmanager?status.svg)](https://godoc.org/github.com/gojue/ebpfmanager)
 
-![HoneyGopher](./ehids-logo-1.png)
 
 ebpfmanager参照datadog/ebpf/manager包的思想，基于cilium/ebpf实现的ebpf类库封装。
 

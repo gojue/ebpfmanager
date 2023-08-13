@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/cilium/ebpf/ringbuf"
+	"github.com/gojue/ebpfmanager/kernel"
 )
 
 // RingbufMapOptions - Perf map specific options
@@ -39,6 +40,13 @@ type RingbufMap struct {
 }
 
 func (m *RingbufMap) Init(manager *Manager) error {
+	kv, err := kernel.HostVersion()
+	if err != nil {
+		// nothing to do.
+	}
+	if kv < kernel.VersionCode(5, 8, 0) {
+		return ErrRingbufNotSupported
+	}
 	m.manager = manager
 	if m.DataHandler == nil {
 		return fmt.Errorf("no DataHandler set for %s", m.Name)

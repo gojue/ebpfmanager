@@ -3,6 +3,7 @@ package main
 import (
 	_ "embed"
 	manager "github.com/gojue/ebpfmanager"
+	"github.com/gojue/ebpfmanager/kernel"
 	"github.com/sirupsen/logrus"
 )
 
@@ -36,6 +37,15 @@ func myDataHandler(cpu int, data []byte, ringbufmap *manager.RingbufMap, manager
 
 func main() {
 	//Initialize the manager
+	logrus.Println("initializing manager")
+	kv, err := kernel.HostVersion()
+	if err != nil {
+		// nothing to do.
+	}
+	if kv < kernel.VersionCode(5, 8, 0) {
+		logrus.Println(manager.ErrRingbufNotSupported, "current kernel version is:", kv.String())
+		return
+	}
 	if err := m.Init(recoverAssets()); err != nil {
 		logrus.Fatal(err)
 	}

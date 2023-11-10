@@ -1,5 +1,12 @@
 <hr>
 
+# v0.4.4 (2023-11-10)
+* feat: update cilium/ebpf to v0.12.3 to support "Freeze .rodata load" via https://github.com/cilium/ebpf/pull/1159.
+  **Full Changelog**: https://github.com/gojue/ebpfmanager/compare/v0.4.2...v0.4.3
+
+
+<hr>
+
 # v0.4.3 (2023-05-19)
 * feat: support SockOps eBPF program.
 **Full Changelog**: https://github.com/gojue/ebpfmanager/compare/v0.4.2...v0.4.3

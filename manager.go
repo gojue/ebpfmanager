@@ -2,6 +2,7 @@ package manager
 
 import (
 	"fmt"
+	"github.com/cilium/ebpf/link"
 	"io"
 	"os"
 	"strings"
@@ -1425,6 +1426,19 @@ func (m *Manager) loadPinnedObjects() error {
 			return err
 		}
 	}
+
+	// Look for pinned programs
+	for _, prog := range m.Probes {
+		if prog.LinkPinPath == "" {
+			continue
+		}
+		if err := m.loadPinnedLink(prog); err != nil {
+			if err == ErrPinnedObjectNotFound {
+				continue
+			}
+			return err
+		}
+	}
 	return nil
 }
 
@@ -1483,6 +1497,23 @@ func (m *Manager) loadPinnedProgram(prog *Probe) error {
 
 	// Detach program from CollectionSpec
 	delete(m.collectionSpec.Programs, prog.EbpfFuncName)
+	return nil
+}
+
+// loadPinnedProgram - Loads a pinned program
+func (m *Manager) loadPinnedLink(prog *Probe) error {
+	// Check if the pinned object exists
+	if _, err := os.Stat(prog.LinkPinPath); err != nil {
+		return ErrPinnedObjectNotFound
+	}
+
+	pinnedLink, err := link.LoadPinnedLink(prog.PinPath, nil)
+	if err != nil {
+		return errors.New(fmt.Sprintf("error:%v , couldn't load link %v from %s", err, prog.GetIdentificationPair(), prog.LinkPinPath))
+	}
+
+	prog.link = pinnedLink
+
 	return nil
 }
 

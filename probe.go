@@ -152,6 +152,8 @@ type Probe struct {
 	// and is already running in the kernel, then it will be loaded from this path.
 	PinPath string
 
+	// LinkPinPath - Once loaded, the eBPF link will be pinned to this path.
+	LinkPinPath string
 	// KProbeMaxActive - (kretprobes) With kretprobes, you can configure the maximum number of instances of the function that can be
 	// probed simultaneously with maxactive. If maxactive is 0 it will be set to the default value: if CONFIG_PREEMPT is
 	// enabled, this is max(10, 2*NR_CPUS); otherwise, it is NR_CPUS. For kprobes, maxactive is ignored.
@@ -218,6 +220,7 @@ func (p *Probe) Copy() *Probe {
 		AttachToFuncName: p.AttachToFuncName,
 		EbpfFuncName:     p.EbpfFuncName,
 		Enabled:          p.Enabled,
+		LinkPinPath:      p.LinkPinPath,
 		PinPath:          p.PinPath,
 		KProbeMaxActive:  p.KProbeMaxActive,
 		BinaryPath:       p.BinaryPath,
@@ -493,7 +496,12 @@ func (p *Probe) attach() error {
 		_ = p.stop(false)
 		return errors.New(fmt.Sprintf("error:%v , couldn't start probe %s", err, p.EbpfFuncName))
 	}
-
+	if p.LinkPinPath != "" && p.link != nil {
+		err := p.link.Pin(p.LinkPinPath)
+		if err != nil {
+			return errors.New(fmt.Sprintf("error:%v , couldn't pin link %s", err, p.LinkPinPath))
+		}
+	}
 	// update probe state
 	p.state = running
 	p.attachRetryAttempt = p.ProbeRetry

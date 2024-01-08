@@ -2,7 +2,6 @@ package manager
 
 import (
 	"fmt"
-	"github.com/cilium/ebpf/link"
 	"net"
 	"os"
 	"regexp"
@@ -11,7 +10,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cilium/ebpf/link"
+
 	"errors"
+
 	"github.com/avast/retry-go"
 	"github.com/florianl/go-tc"
 	"github.com/florianl/go-tc/core"
@@ -487,6 +489,8 @@ func (p *Probe) attach() error {
 		err = p.attachXDP()
 	case ebpf.RawTracepoint:
 		err = p.attachRawTracepoint()
+	case ebpf.LSM:
+		err = p.attachLsm()
 	default:
 		err = fmt.Errorf("program type %s not implemented yet", p.programSpec.Type)
 	}
@@ -906,6 +910,16 @@ func (p *Probe) attachRawTracepoint() error {
 	})
 	if err != nil {
 		return errors.New(fmt.Sprintf("error:%v , couldn's activate raw_tracepoint %s, matchFuncName:%s", err, p.Section, p.EbpfFuncName))
+	}
+	p.link = link
+	return nil
+}
+
+// attachLsm - Attaches the probe to its lsm hook
+func (p *Probe) attachLsm() error {
+	link, err := link.AttachLSM(link.LSMOptions{Program: p.program})
+	if err != nil {
+		return errors.New(fmt.Sprintf("error:%v , couldn's activate lsm %s, matchFuncName:%s", err, p.Section, p.EbpfFuncName))
 	}
 	p.link = link
 	return nil

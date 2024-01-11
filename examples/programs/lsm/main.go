@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"github.com/gojue/ebpfmanager/kernel"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -25,20 +26,22 @@ var m = &manager.Manager{
 
 func main() {
 	// Linux kernel version >= 5.7
-	// Run the cat /boot/config-$(uname -r) | grep BPF_LSM command to check whether the LSM is supported
-	cmd := exec.Command("bash", "-c", "cat /boot/config-$(uname -r) | grep BPF_LSM")
-	out, err := cmd.CombinedOutput()
-
+	logrus.Println("initializing manager")
+	kv, err := kernel.HostVersion()
 	if err != nil {
-		logrus.Println("Exec: cat /boot/config-$(uname -r) | grep BPF_LSM error", err.Error())
+		// nothing to do.
+	}
+	if kv < kernel.VersionCode(5, 7, 0) {
+		logrus.Println(manager.ErrLSMNotSupported, "current kernel version is:", kv.String())
 		return
 	}
 
-	output := strings.ToLower(string(out))
+	// Run the cat /boot/config-$(uname -r) | grep BPF_LSM command to check whether the LSM is supported
 	// check CONFIG_BPF_LSM=y
 	logrus.Println("cat /boot/config-$(uname -r) | grep BPF_LSM")
-	if !strings.Contains(output, "config_bpf_lsm=y") {
-		logrus.Println("Linux kernel does not support CONFIG_BPF_LSM=y")
+	isSupportLSM := checkSupportLSM()
+	if !isSupportLSM {
+		logrus.Println(manager.ErrLSMNotSupported, "Linux kernel does not support CONFIG_BPF_LSM=y")
 		return
 	} else {
 		logrus.Println("Linux kernel supports CONFIG_BPF_LSM=y")

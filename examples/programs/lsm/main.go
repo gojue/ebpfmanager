@@ -4,9 +4,7 @@ import (
 	"fmt"
 	"github.com/gojue/ebpfmanager/kernel"
 	"os"
-	"os/exec"
 	"os/signal"
-	"strings"
 	"time"
 
 	manager "github.com/gojue/ebpfmanager"

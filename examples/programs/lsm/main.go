@@ -2,9 +2,12 @@ package main
 
 import (
 	"fmt"
+	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/features"
 	"github.com/gojue/ebpfmanager/kernel"
 	"os"
 	"os/signal"
+	"runtime"
 	"time"
 
 	manager "github.com/gojue/ebpfmanager"
@@ -23,6 +26,19 @@ var m = &manager.Manager{
 }
 
 func main() {
+	if features.HaveProgramType(ebpf.LSM) != nil {
+		return
+	}
+	lvc, err := features.LinuxVersionCode()
+	if err != nil {
+		return
+	}
+	//Check whether the arch arm64/aarch64 environment kernel version >= 6
+	if runtime.GOARCH == "arm64" && (lvc>>16) < 6 {
+		// LSM unsupported
+		return
+	}
+
 	// Linux kernel version >= 5.7
 	logrus.Println("initializing manager")
 	kv, err := kernel.HostVersion()

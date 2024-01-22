@@ -1,7 +1,7 @@
 #include "include/bpf.h"
 #include "include/bpf_helpers.h"
 
-#ifdef KERNEL_GE_5_7
+#ifdef KERNEL_SUPPORT_LSM
     struct path;
     SEC("lsm/path_mkdir")
     int lsm_path_mkdir(const struct path *path)

@@ -2,7 +2,7 @@
 # Kernel Version detect
 #
 
-KERNEL_GE_5_7_FLAGS ?=
+KERNEL_SUPPORT_LSM_FLAGS ?=
 # 获取内核版本
 
 KVER = $(shell uname -r)
@@ -22,11 +22,33 @@ if($(KREV) < $(3)) {print 0} else { print 1 } \
 }}}}}' \
 )
 
-ifeq ($(call kver_ge,5,7,0),1)
-	KERNEL_GE_5_7_FLAGS = -DKERNEL_GE_5_7
+ARCH := $(shell uname -m)
+
+ifeq ($(ARCH),aarch64)
+	# arch aarch64
+	ARCH_TARGET := arm64
+else ifeq ($(ARCH),arm64)
+	# arch arm64
+	ARCH_TARGET := arm64
 else
-	# The kernel version is less than 5.7
-	break
+	# other arch
+	ARCH_TARGET := other
+endif
+
+ifeq ($(ARCH_TARGET),arm64)
+	ifeq ($(call kver_ge,6,0,0),1)
+		KERNEL_SUPPORT_LSM_FLAGS = -DKERNEL_SUPPORT_LSM
+	else
+		# The arch arm64  kernel version is less than 6.0
+		break
+	endif
+else
+	ifeq ($(call kver_ge,5,7,0),1)
+		KERNEL_SUPPORT_LSM_FLAGS = -DKERNEL_SUPPORT_LSM
+	else
+		# The kernel version is less than 5.7
+		break
+	endif
 endif
 
 all: build-ebpf build run
@@ -34,7 +56,7 @@ all: build-ebpf build run
 build-ebpf:
 	mkdir -p ebpf/bin
 	clang -D__KERNEL__ -D__ASM_SYSREG_H \
-		$(KERNEL_GE_5_7_FLAGS) \
+		$(KERNEL_SUPPORT_LSM_FLAGS) \
 		-Wno-unused-value \
 		-Wno-pointer-sign \
 		-Wno-compare-distinct-pointer-types \

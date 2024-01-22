@@ -40,14 +40,12 @@ ifeq ($(ARCH_TARGET),arm64)
 		KERNEL_SUPPORT_LSM_FLAGS = -DKERNEL_SUPPORT_LSM
 	else
 		# The arch arm64  kernel version is less than 6.0
-		break
 	endif
 else
 	ifeq ($(call kver_ge,5,7,0),1)
 		KERNEL_SUPPORT_LSM_FLAGS = -DKERNEL_SUPPORT_LSM
 	else
 		# The kernel version is less than 5.7
-		break
 	endif
 endif
 

@@ -1,9 +1,22 @@
 <hr>
 
-# v0.4.4 (2023-11-10)
-* feat: update cilium/ebpf to v0.12.3 to support "Freeze .rodata load" via https://github.com/cilium/ebpf/pull/1159.
-  **Full Changelog**: https://github.com/gojue/ebpfmanager/compare/v0.4.2...v0.4.3
+# v0.4.5 (2024-02-02)
+## What's Changed
 
+**Full Changelog**: https://github.com/gojue/ebpfmanager/compare/v0.4.4...v0.4.5
+
+<hr>
+
+# v0.4.4 (2023-11-10)
+## What's Changed
+* add pinned map flag by @cfc4n in https://github.com/gojue/ebpfmanager/pull/34
+* add ringbuf support by @spoock1024 in https://github.com/gojue/ebpfmanager/pull/35
+* add kernel version detection to ringbuf map. by @cfc4n in https://github.com/gojue/ebpfmanager/pull/37
+
+## New Contributors
+* @spoock1024 made their first contribution in https://github.com/gojue/ebpfmanager/pull/35
+
+**Full Changelog**: https://github.com/gojue/ebpfmanager/compare/v0.4.3...v0.4.4
 
 <hr>
 

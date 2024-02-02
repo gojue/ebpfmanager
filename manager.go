@@ -237,6 +237,10 @@ type netlinkCacheValue struct {
 	schedClsCount int
 }
 
+// InstructionPatcherFunc - A function that patches the instructions of a program
+// more info  https://github.com/DataDog/ebpf-manager/blob/main/manager.go#L158
+type InstructionPatcherFunc func(m *Manager) error
+
 // Manager - Helper structure that manages multiple eBPF programs and maps
 type Manager struct {
 	wg             *sync.WaitGroup
@@ -258,6 +262,10 @@ type Manager struct {
 	PerfMaps []*PerfMap
 
 	RingbufMaps []*RingbufMap
+
+	// InstructionPatchers - Callback functions called before loading probes, to
+	// provide user the ability to perform last minute instruction patching.
+	InstructionPatchers []InstructionPatcherFunc
 }
 
 // DumpMaps - Return a string containing human readable info about eBPF maps
@@ -526,7 +534,11 @@ func (m *Manager) InitWithOptions(elf io.ReaderAt, options Options) error {
 	m.activateProbes()
 	m.state = initialized
 	m.stateLock.Unlock()
-
+	resetManager := func(m *Manager) {
+		m.stateLock.Lock()
+		m.state = reset
+		m.stateLock.Unlock()
+	}
 	// Edit program constants
 	if len(options.ConstantEditors) > 0 {
 		if err := m.editConstants(); err != nil {
@@ -544,6 +556,14 @@ func (m *Manager) InitWithOptions(elf io.ReaderAt, options Options) error {
 	// Edit program maps
 	if len(options.MapEditors) > 0 {
 		if err := m.editMaps(options.MapEditors); err != nil {
+			return err
+		}
+	}
+
+	// Patch instructions
+	for _, patcher := range m.InstructionPatchers {
+		if err := patcher(m); err != nil {
+			resetManager(m)
 			return err
 		}
 	}

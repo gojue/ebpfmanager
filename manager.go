@@ -1,20 +1,19 @@
 package manager
 
 import (
+	"errors"
 	"fmt"
-	"github.com/cilium/ebpf/link"
 	"io"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
-	"errors"
+	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/link"
 	"github.com/florianl/go-tc"
 	"github.com/hashicorp/go-multierror"
 	"golang.org/x/sys/unix"
-
-	"github.com/cilium/ebpf"
 )
 
 // ConstantEditor - A constant editor tries to rewrite the value of a constant in a compiled eBPF program.
@@ -371,13 +370,13 @@ func (m *Manager) editMapSpec(name string, mapSpec *ebpf.MapSpec) error {
 		return ErrManagerNotInitialized
 	}
 
-	//判断是否存在该map
+	// 判断是否存在该map
 	_, ok := m.collectionSpec.Maps[name]
 	if !ok {
 		return ErrUnknownMap
 	}
 
-	//覆盖mapSpec
+	// 覆盖mapSpec
 	m.collectionSpec.Maps[name] = mapSpec
 	return nil
 }
@@ -448,7 +447,7 @@ func (m *Manager) GetProgramSpec(id ProbeIdentificationPair) ([]*ebpf.ProgramSpe
 		if len(programs) > 0 {
 			return programs, true, nil
 		}
-		//prog, ok := m.collectionSpec.Programs[id.Section]
+		// prog, ok := m.collectionSpec.Programs[id.Section]
 		prog, ok := m.collectionSpec.Programs[id.EbpfFuncName]
 		return []*ebpf.ProgramSpec{prog}, ok, nil
 	}
@@ -1096,7 +1095,6 @@ func (m *Manager) getProbeProgramSpec(matchFuncName string) (*ebpf.ProgramSpec, 
 
 // matchSpecs - Match loaded maps and program specs with the maps and programs provided to the manager
 func (m *Manager) matchSpecs() error {
-
 	// Match programs
 	for _, probe := range m.Probes {
 		programSpec, err := m.getProbeProgramSpec(probe.EbpfFuncName)
@@ -1314,7 +1312,7 @@ func (m *Manager) editConstant(prog *ebpf.ProgramSpec, editor ConstantEditor) er
 // rewriteMaps - Rewrite the provided program spec with the provided maps
 func (m *Manager) rewriteMaps(program *ebpf.ProgramSpec, eBPFMaps map[string]*ebpf.Map) error {
 	for symbol, eBPFMap := range eBPFMaps {
-		//fd := eBPFMap.FD()
+		// fd := eBPFMap.FD()
 		err := program.Instructions.AssociateMap(symbol, eBPFMap)
 		if err != nil {
 			return errors.New(fmt.Sprintf("error:%v , couldn't rewrite map %s", err, symbol))
@@ -1370,7 +1368,7 @@ func (m *Manager) loadCollection() error {
 	// Load collection
 	m.collection, err = ebpf.NewCollectionWithOptions(m.collectionSpec, m.options.VerifierOptions)
 	if err != nil {
-		return errors.New(fmt.Sprintf("error:%v , couldn't load eBPF programs, cs:%v", err, m.collectionSpec))
+		return fmt.Errorf("error:%w , couldn't load eBPF programs, cs:%v", err, m.collectionSpec)
 	}
 
 	// Initialize Maps
@@ -1387,7 +1385,7 @@ func (m *Manager) loadCollection() error {
 		}
 	}
 
-	//Initialize ringbufmap
+	// Initialize ringbufmap
 	for _, ringbufMap := range m.RingbufMaps {
 		if err := ringbufMap.Init(m); err != nil {
 			return err

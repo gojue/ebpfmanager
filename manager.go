@@ -1367,8 +1367,12 @@ func (m *Manager) loadCollection() error {
 	var err error
 	// Load collection
 	m.collection, err = ebpf.NewCollectionWithOptions(m.collectionSpec, m.options.VerifierOptions)
+	var ve *ebpf.VerifierError
 	if err != nil {
-		return fmt.Errorf("error:%w , couldn't load eBPF programs, cs:%v", err, m.collectionSpec)
+		if errors.As(err, &ve) {
+			return fmt.Errorf("verifier error:%+v , couldn't load eBPF programs, cs:%v", ve, m.collectionSpec)
+		}
+		return fmt.Errorf("error:%v , couldn't load eBPF programs, cs:%v", err, m.collectionSpec)
 	}
 
 	// Initialize Maps

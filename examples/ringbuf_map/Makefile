@@ -1,8 +1,5 @@
 all: build-ebpf build run
 
-export GO111MODULE=on
-export PATH := $(shell go env GOPATH)/bin:$(shell go env GOROOT)/bin:$(PATH)
-
 build-ebpf:
 	mkdir -p ebpf/bin
 	clang -D__KERNEL__ -D__ASM_SYSREG_H \

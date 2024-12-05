@@ -2,13 +2,13 @@ package manager
 
 import (
 	"bufio"
+	"bytes"
 	"debug/elf"
 	"errors"
 	"fmt"
 	"os"
 	"regexp"
 	"runtime"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -53,33 +53,32 @@ func FindFilterFunction(funcName string) (string, error) {
 		return "", err
 	}
 
-	// Cache available filter functions if necessary
-	if len(availableFilterFunctions) == 0 {
-		funcs, err := os.ReadFile("/sys/kernel/debug/tracing/available_filter_functions")
-		if err != nil {
-			return "", err
+	funcsReader, err := TracefsOpen("available_filter_functions")
+	if err != nil {
+		return "", err
+	}
+	defer funcsReader.Close()
+
+	funcs := bufio.NewScanner(funcsReader)
+	funcs.Split(bufio.ScanLines)
+
+	var potentialMatches []string
+	for funcs.Scan() {
+		name := funcs.Bytes()
+		name, _, _ = bytes.Cut(name, []byte(" "))
+		name, _, _ = bytes.Cut(name, []byte("\t"))
+
+		if string(name) == funcName {
+			return funcName, nil
 		}
-		availableFilterFunctions = strings.Split(string(funcs), "\n")
-		for i, name := range availableFilterFunctions {
-			splittedName := strings.Split(name, " ")
-			name = splittedName[0]
-			splittedName = strings.Split(name, "\t")
-			name = splittedName[0]
-			availableFilterFunctions[i] = name
+		if searchedName.Match(name) {
+			potentialMatches = append(potentialMatches, string(name))
 		}
-		sort.Strings(availableFilterFunctions)
+	}
+	if err := funcs.Err(); err != nil {
+		return "", err
 	}
 
-	// Match function name
-	var potentialMatches []string
-	for _, f := range availableFilterFunctions {
-		if searchedName.MatchString(f) {
-			potentialMatches = append(potentialMatches, f)
-		}
-		if f == funcName {
-			return f, nil
-		}
-	}
 	if len(potentialMatches) > 0 {
 		return potentialMatches[0], nil
 	}

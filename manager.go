@@ -134,7 +134,10 @@ func (ps *ProbeSelector) RunValidator(manager *Manager) error {
 		return fmt.Errorf("probe not found: %s", ps.ProbeIdentificationPair)
 	}
 	if !p.IsRunning() && p.Enabled {
-		return fmt.Errorf("error:%v, %s", p.GetLastError(), ps.ProbeIdentificationPair.String())
+		if p.GetLastError() != nil {
+			return fmt.Errorf("error:%v, %s", p.GetLastError(), ps.ProbeIdentificationPair.String())
+		}
+		return nil
 	}
 	if !p.Enabled {
 		return fmt.Errorf(
@@ -1529,7 +1532,7 @@ func (m *Manager) loadPinnedLink(prog *Probe) error {
 		return ErrPinnedObjectNotFound
 	}
 
-	pinnedLink, err := link.LoadPinnedLink(prog.PinPath, nil)
+	pinnedLink, err := link.LoadPinnedLink(prog.LinkPinPath, nil)
 	if err != nil {
 		return errors.New(fmt.Sprintf("error:%v , couldn't load link %v from %s", err, prog.GetIdentificationPair(), prog.LinkPinPath))
 	}

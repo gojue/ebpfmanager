@@ -115,7 +115,7 @@ func GetSyscallFnNameWithSymFile(name string, symFile string) (string, error) {
 		// cache up the kallsyms for speed up
 		scanner := bufio.NewScanner(file)
 		for scanner.Scan() {
-			line := strings.Split(scanner.Text(), " ")
+			line := strings.Fields(scanner.Text())
 			if len(line) < 3 {
 				continue
 			}

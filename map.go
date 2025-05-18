@@ -19,12 +19,11 @@ import (
 //
 // A map can only be in one of the following categories
 //
-//               ----------------------         ---------------------------------------
-//              |   Internally loaded  |       |           Externally loaded           |
-//               ----------------------         ---------------------------------------
-//  Categories: |  Pinned | Not Pinned |       |  Pinned | Pinned and Edited  | Edited |
-//               ----------------------         ---------------------------------------
-//
+//	             ----------------------         ---------------------------------------
+//	            |   Internally loaded  |       |           Externally loaded           |
+//	             ----------------------         ---------------------------------------
+//	Categories: |  Pinned | Not Pinned |       |  Pinned | Pinned and Edited  | Edited |
+//	             ----------------------         ---------------------------------------
 type MapCleanupType int
 
 const (
@@ -82,10 +81,10 @@ type Map struct {
 func loadNewMap(spec ebpf.MapSpec, options MapOptions) (*Map, error) {
 	// Create new map
 	managerMap := Map{
-		arraySpec:  &spec,
-		Name:       spec.Name,
-		Contents:   spec.Contents,
-		Freeze:     spec.Freeze,
+		arraySpec: &spec,
+		Name:      spec.Name,
+		Contents:  spec.Contents,
+		//Freeze:     spec.Freeze,
 		MapOptions: options,
 	}
 

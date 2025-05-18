@@ -11,7 +11,7 @@ ebpfmanager参照datadog/ebpf/manager包的思想，基于cilium/ebpf实现的eb
 
 # 依赖
 
-* [cilium/ebpf v0.9.0](https://github.com/cilium/ebpf/releases/tag/v0.9.0)    2022-06-16
+* [cilium/ebpf v0.18.0](https://github.com/cilium/ebpf/releases/tag/v0.18.0)    2025-05-18
 * [go-bindata](https://github.com/shuLhan/go-bindata/cmd/go-bindata)  用于生成ebpf字节码文件的go包，与`go:embed`类似。
 ```shell
 go get -d github.com/shuLhan/go-bindata/cmd/go-bindata

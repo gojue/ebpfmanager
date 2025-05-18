@@ -1119,7 +1119,7 @@ func (m *Manager) matchSpecs() error {
 			return errors.New(fmt.Sprintf("error:%v , couldn't find map at maps/%s", ErrUnknownMap, managerMap.Name))
 		}
 		spec.Contents = managerMap.Contents
-		spec.Freeze = managerMap.Freeze
+		//spec.Freeze = managerMap.Freeze
 		managerMap.arraySpec = spec
 	}
 

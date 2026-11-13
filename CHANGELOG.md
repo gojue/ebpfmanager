@@ -1,3 +1,24 @@
+# Unreleased
+
+* Manually synchronize the core implementation and regression fixtures with
+  DataDog/ebpf-manager main at `ecf203d78b8777fb7f61e77062a30eb7b1b70b3f`
+  (2026-10-29), following the previous `467114a3` / upstream `31843479` sync.
+* Import upstream lifecycle and concurrency fixes, two-phase reader shutdown,
+  TC/netns handling, attach-method fallback, tracing/iterator/perf-event support,
+  map replacements, constant callbacks, exclusions, telemetry and BTF cleanup.
+* Preserve the eCapture-facing API, automatic BTF constants, absolute `UAddress`
+  plus relative `UprobeOffset`, legacy network/PID fields, link pinning, ringbuf
+  callbacks, map editors and instruction patchers. No eCapture source migration
+  is required by these interfaces.
+* Keep the fork module path, Go 1.26.0 baseline, custom examples and kernel
+  helpers. Retain upstream license attribution in `LICENSE.upstream`.
+* Add compatibility regressions and run CI using the Go version in `go.mod`,
+  generated test fixtures and the race detector. Example programs are compiled
+  by `go test ./...`; interactive demos are not launched by CI.
+* Validate unchanged eCapture callers on Linux arm64: race tests, production
+  lint, clean CO-RE/non-CO-RE/combined builds, 99 TLS E2E cases and three auxiliary
+  probe cases. See the README for the tested source revision and coverage limits.
+
 <hr>
 
 # v0.6.0 (2026-09-08)

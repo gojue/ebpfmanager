@@ -1,150 +1,122 @@
 package manager
 
 import (
+	"errors"
 	"fmt"
-	"net"
+	"io"
 	"os"
-	"regexp"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
-
-	"errors"
-
-	"github.com/avast/retry-go"
-	"github.com/florianl/go-tc"
-	"github.com/florianl/go-tc/core"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 
-	"github.com/cilium/ebpf"
+	"github.com/gojue/ebpfmanager/internal"
 )
 
-// XdpAttachMode selects a way how XDP program will be attached to interface
-type XdpAttachMode int
+type AttachMethod uint32
 
 const (
-	// XdpAttachModeNone stands for "best effort" - kernel automatically
-	// selects best mode (would try Drv first, then fallback to Generic).
-	// NOTE: Kernel will not fallback to Generic XDP if NIC driver failed
-	//       to install XDP program.
-	XdpAttachModeNone XdpAttachMode = 0
-	// XdpAttachModeSkb is "generic", kernel mode, less performant comparing to native,
-	// but does not requires driver support.
-	XdpAttachModeSkb XdpAttachMode = 1 << 1
-	// XdpAttachModeDrv is native, driver mode (support from driver side required)
-	XdpAttachModeDrv XdpAttachMode = 1 << 2
-	// XdpAttachModeHw suitable for NICs with hardware XDP support
-	XdpAttachModeHw XdpAttachMode = 1 << 3
-	// DefaultTCFilterPriority is the default TC filter priority if none were given
-	DefaultTCFilterPriority = 50
+	AttachMethodNotSet AttachMethod = iota
+	AttachWithPerfEventOpen
+	AttachWithProbeEvents
 )
 
-type TrafficType uint16
+const bypassMapName = "program_bypassed"
+const bypassOptInReference = "bypass_program"
 
-func (tt TrafficType) String() string {
-	switch tt {
-	case Ingress:
-		return "ingress"
-	case Egress:
-		return "egress"
-	default:
-		return fmt.Sprintf("TrafficType(%d)", tt)
-	}
-}
-
-const (
-	Ingress          = TrafficType(tc.HandleMinIngress)
-	Egress           = TrafficType(tc.HandleMinEgress)
-	clsactQdisc      = uint16(netlink.HANDLE_INGRESS >> 16)
-	UnknownProbeType = ""
-	ProbeType        = "p"
-	RetProbeType     = "r"
-)
-
-type ProbeIdentificationPair struct {
-	UID string
-	//Section string
-	EbpfFuncName string //在cilium/efbp v0.7.0里，返回的paramsspec中，改为以.o字节码中符号表函数名为索引的map，故这里改为matchfunName。 section信息无法使用
-}
-
-func (pip ProbeIdentificationPair) String() string {
-	return fmt.Sprintf("{UID:%s, EbpfFuncName:%s}", pip.UID, pip.EbpfFuncName)
-}
-
-// Matches - Returns true if the identification pair (probe uid, probe section) matches.
-func (pip ProbeIdentificationPair) Matches(id ProbeIdentificationPair) bool {
-	return pip.UID == id.UID && pip.EbpfFuncName == id.EbpfFuncName
-}
+// values used for map update to bypass/enable programs
+var bypassValue any
+var enableValue any
 
 // Probe - Main eBPF probe wrapper. This structure is used to store the required data to attach a loaded eBPF
 // program to its hook point.
 type Probe struct {
-	manager            *Manager
-	program            *ebpf.Program
-	programSpec        *ebpf.ProgramSpec
-	attachPID          int
-	link               link.Link
-	tcFilter           netlink.BpfFilter
-	tcClsActQdisc      netlink.Qdisc
-	state              state
-	stateLock          sync.RWMutex
-	manualLoadNeeded   bool
-	checkPin           bool
-	funcName           string //目标hook对象的函数名；uprobe中，若为空，则使用offset。
-	AttachPID          int    // pid to attach, only for uprobe .
-	attachRetryAttempt uint
-
-	// TCFilterHandle - (TC classifier) defines the handle to use when loading the classifier. Leave unset to let the kernel decide which handle to use.
-	TCFilterHandle uint32
-
-	// TCFilterPrio - (TC classifier) defines the priority of the classifier added to the clsact qdisc. Defaults to DefaultTCFilterPriority.
-	TCFilterPrio uint16
-
-	// TCCleanupQDisc - (TC classifier) defines if the manager should cleanup the clsact qdisc when a probe is unloaded
-	TCCleanupQDisc bool
-
-	// TCFilterProtocol - (TC classifier) defines the protocol to match in order to trigger the classifier. Defaults to
-	// ETH_P_ALL.
-	TCFilterProtocol uint16
+	netlinkSocketCache      *netlinkSocketCache
+	program                 *ebpf.Program
+	programSpec             *ebpf.ProgramSpec
+	state                   state
+	stateLock               sync.RWMutex
+	manualLoadNeeded        bool
+	checkPin                bool
+	attachPID               int
+	attachRetryAttempt      uint
+	kprobeHookPointNotExist bool
+	systemWideID            int
+	programTag              string
+	kprobeType              probeType
+	isReturnProbe           bool
+	link                    netlink.Link
+	tcFilter                netlink.BpfFilter
+	tcClsActQdisc           netlink.Qdisc
+	progLink                io.Closer
+	bypassIndex             uint32
+	bypassMap               *Map
 
 	// lastError - stores the last error that the probe encountered, it is used to surface a more useful error message
 	// when one of the validators (see Options.ActivatedProbes) fails.
 	lastError error
 
-	// UID - (optional) this field can be used to identify your probes when the same eBPF program is used on multiple
-	// hook points. Keep in mind that the pair (probe section, probe UID) needs to be unique
-	// system-wide for the kprobes and uprobes registration to work.
-	UID string
+	// ProbeIdentificationPair is used to identify the current probe
+	UID          string
+	EbpfFuncName string
 
-	// Section - Section of the program, as defined in its section SEC("[section]"). This section is therefore made of
-	// a prefix
-	//
-	// NOTE: 字节码中段信息不被新版ebpf库programSpec map作为索引。 v0.7.0
-	// 故，不能作为programSpec[]的索引来使用。索引改用MatchFuncName
-	Section string
+	// Section and AttachToFuncName retain the fork's probe configuration API.
+	// Section overrides the ELF section used to select the attachment type.
+	Section          string
+	AttachToFuncName string
+	// UAddress is a file offset supplied by the caller. UprobeOffset is relative
+	// to UAddress, or to the resolved symbol when UAddress is zero.
+	UAddress         uint64
+	AttachPID        int
+	LinkPinPath      string
+	Ifindex          int32
+	Ifname           string
+	IfindexNetns     uint64
+	SkipLoopback     bool
+	uprobeFileOffset uint64
 
 	// CopyProgram - When enabled, this option will make a unique copy of the program section for the current program
 	CopyProgram bool
 
-	// EbpfFuncName - Name of the syscall on which the program should be hooked. As the exact kernel symbol may
+	// KeepProgramSpec - Defines if the internal *ProgramSpec should be cleaned up after the probe has been successfully
+	// attached to free up memory. If you intend to make a copy of this Probe later, you should explicitly set this
+	// option to true.
+	KeepProgramSpec bool
+
+	// SyscallFuncName - Name of the syscall on which the program should be hooked. As the exact kernel symbol may
 	// differ from one kernel version to the other, the right prefix will be computed automatically at runtime.
 	// If a syscall name is not provided, the section name (without its probe type prefix) is assumed to be the
 	// hook point.
-	EbpfFuncName string
+	SyscallFuncName string
 
-	// AttachToFuncName - Pattern used to find the function(s) to attach to
-	// FOR KPROBES: When this option is activated, the provided pattern is matched against the list of available symbols
+	// MatchFuncName - Pattern used to find the function(s) to attach to
+	// FOR KPROBES: When this field is used, the provided pattern is matched against the list of available symbols
 	// in /sys/kernel/debug/tracing/available_filter_functions. If the exact function does not exist, then the first
 	// symbol matching the provided pattern will be used. This option requires debugfs.
 	//
-	// FOR UPROBES: When this option is activated, the provided pattern is matched the list of symbols in the symbol
+	// FOR UPROBES: When this field is used, the provided pattern is matched against the list of symbols in the symbol
 	// table of the provided elf binary. If the exact function does not exist, then the first symbol matching the
 	// provided pattern will be used.
-	AttachToFuncName string
+	MatchFuncName string
+
+	// HookFuncName - Exact name of the symbol to hook onto. When this field is set, MatchFuncName and SyscallFuncName
+	// are ignored.
+	HookFuncName string
+
+	// TracepointCategory - (Tracepoint) The manager expects the tracepoint category to be parsed from the eBPF section
+	// in which the eBPF function of this Probe lives (SEC("tracepoint/[category]/[name]")). However, you can use this
+	// field to override it.
+	TracepointCategory string
+
+	// TracepointName - (Tracepoint) The manager expects the tracepoint name to be parsed from the eBPF section
+	// in which the eBPF function of this Probe lives (SEC("tracepoint/[category]/[name]")). However, you can use this
+	// field to override it.
+	TracepointName string
 
 	// Enabled - Indicates if a probe should be enabled or not. This parameter can be set at runtime using the
 	// Manager options (see ActivatedProbes)
@@ -154,22 +126,19 @@ type Probe struct {
 	// and is already running in the kernel, then it will be loaded from this path.
 	PinPath string
 
-	// LinkPinPath - Once loaded, the eBPF link will be pinned to this path.
-	LinkPinPath string
 	// KProbeMaxActive - (kretprobes) With kretprobes, you can configure the maximum number of instances of the function that can be
 	// probed simultaneously with maxactive. If maxactive is 0 it will be set to the default value: if CONFIG_PREEMPT is
 	// enabled, this is max(10, 2*NR_CPUS); otherwise, it is NR_CPUS. For kprobes, maxactive is ignored.
 	KProbeMaxActive int
 
-	// UprobeOffset - this field changed from being an absolute offset to being relative to Address.
-	//	Now, It's a relative value
-	UprobeOffset uint64
+	// KprobeAttachMethod - Method to use for attaching the kprobe. Either use perfEventOpen ABI or kprobe events
+	KprobeAttachMethod KprobeAttachMethod
 
-	// UAddress Symbol address. Must be provided in case of external symbols (shared libs).
-	// same as UprobeOptions.Address in cilium/ebpf
-	// offset的含义变为相对偏移量，会自动跟symbol name的地址相加，作为真正hook的地址。
-	// address参数也就是不需要类库再计算的绝对地址，即等于上面二者只和。 优先级最高。
-	UAddress uint64
+	// UprobeAttachMethod - Method to use for attaching the uprobe. Either use perfEventOpen ABI or uprobe events
+	UprobeAttachMethod AttachMethod
+
+	// UprobeOffset is added to UAddress or the resolved symbol's file offset.
+	UprobeOffset uint64
 
 	// ProbeRetry - Defines the number of times that the probe will retry to attach / detach on error.
 	ProbeRetry uint
@@ -181,7 +150,7 @@ type Probe struct {
 	// automatically computed for the symbol name provided in the uprobe section ( SEC("uprobe/[symbol_name]") ).
 	BinaryPath string
 
-	// CGrouPath - (cgroup family programs) All CGroup programs are attached to a CGroup (v2). This field provides the
+	// CGroupPath - (cgroup family programs) All CGroup programs are attached to a CGroup (v2). This field provides the
 	// path to the CGroup to which the probe should be attached. The attach type is determined by the section.
 	CGroupPath string
 
@@ -189,73 +158,132 @@ type Probe struct {
 	// before they reach user space. The probe will be bound to the provided file descriptor
 	SocketFD int
 
-	// Ifindex - (TC classifier & XDP) Interface index used to identify the interface on which the probe will be
-	// attached. If not set, fall back to Ifname.
-	Ifindex int32
+	// IfIndex - (TC classifier & XDP) Interface index used to identify the interface on which the probe will be
+	// attached. If not set, fall back to `IfName`.
+	IfIndex int
 
-	// Ifname - (TC Classifier & XDP) Interface name on which the probe will be attached.
-	Ifname string
+	// IfName - (TC Classifier & XDP) Interface name on which the probe will be attached.
+	IfName string
 
-	// IfindexNetns - (TC Classifier & XDP) Network namespace in which the network interface lives
-	IfindexNetns uint64
+	// IfIndexNetns - (TC Classifier & XDP) Network namespace in which the network interface lives. If this value is
+	// provided, then IfIndexNetnsID is required too.
+	// WARNING: it is up to the caller of "Probe.Start()" to close this netns handle. Failing to close this handle may
+	// lead to leaking the network namespace. This handle can be safely closed once "Probe.Start()" returns.
+	IfIndexNetns uint64
+
+	// IfIndexNetnsID - (TC Classifier & XDP) Network namespace ID associated of the IfIndexNetns handle. If this value
+	// is provided, then IfIndexNetns is required too.
+	// WARNING: it is up to the caller of "Probe.Start()" to call "manager.CleanupNetworkNamespace()" once the provided
+	// IfIndexNetnsID is no longer needed. Failing to call this cleanup function may lead to leaking the network
+	// namespace. Remember that "manager.CleanupNetworkNamespace()" will close the netlink socket opened with the netns
+	// handle provided above. If you want to start the probe again, you'll need to provide a new valid netns handle so
+	// that a new netlink socket can be created in that namespace.
+	IfIndexNetnsID uint32
 
 	// XDPAttachMode - (XDP) XDP attach mode. If not provided the kernel will automatically select the best available
 	// mode.
 	XDPAttachMode XdpAttachMode
 
 	// NetworkDirection - (TC classifier) Network traffic direction of the classifier. Can be either Ingress or Egress. Keep
-	// in mind that if you are hooking on the host side of a virtuel ethernet pair, Ingress and Egress are inverted.
+	// in mind that if you are hooking on the host side of a virtual ethernet pair, Ingress and Egress are inverted.
 	NetworkDirection TrafficType
 
-	// SkipLoopback loopback devices are special, some tc probes should be skipped ,see https://github.com/aquasecurity/tracee/blob/fcdb1d6171ef75b22248253a51b581856328f75c/pkg/ebpf/probes/probes.go#L322 for more detail.
-	SkipLoopback bool
-	// tcObject - (TC classifier) TC object created when the classifier was attached. It will be reused to delete it on
-	// exit.
-	tcObject *tc.Object
+	// TCFilterHandle - (TC classifier) defines the handle to use when loading the classifier. Leave unset to let the kernel decide which handle to use.
+	TCFilterHandle uint32
+
+	// TCFilterPrio - (TC classifier) defines the priority of the classifier added to the clsact qdisc. Defaults to DefaultTCFilterPriority.
+	TCFilterPrio uint16
+
+	// TCCleanupQDisc - (TC classifier) defines if the manager should clean up the clsact qdisc when a probe is unloaded
+	TCCleanupQDisc bool
+
+	// TCFilterProtocol - (TC classifier) defines the protocol to match in order to trigger the classifier. Defaults to
+	// ETH_P_ALL.
+	TCFilterProtocol uint16
+
+	// SamplePeriod - (Perf event) This parameter defines when the perf_event eBPF program is triggered. When SamplePeriod > 0
+	// the program will be triggered every SamplePeriod events.
+	SamplePeriod int
+
+	// SampleFrequency - (Perf event) This parameter defines when the perf_event eBPF program is triggered. When
+	// SampleFrequency > 0, SamplePeriod is ignored and the eBPF program is triggered at the requested frequency.
+	SampleFrequency int
+
+	// PerfEventType - (Perf event) This parameter defines the type of the perf_event program. Allowed values are
+	// unix.PERF_TYPE_HARDWARE and unix.PERF_TYPE_SOFTWARE
+	PerfEventType int
+
+	// PerfEventPID - (Perf event, uprobes) This parameter defines the PID for which the program should be triggered.
+	// Do not set this value to monitor the whole host.
+	PerfEventPID int
+
+	// PerfEventConfig - (Perf event) This parameter defines which software or hardware event is being monitored. See the
+	// PERF_COUNT_SW_* and PERF_COUNT_HW_* constants in the unix package.
+	PerfEventConfig int
+
+	// PerfEventCPUCount - (Perf event) This parameter defines the number of CPUs to monitor. If not set, defaults to
+	// runtime.NumCPU(). Disclaimer: in containerized environment and depending on the CPU affinity of the program
+	// holding the manager, runtime.NumCPU might not return the real CPU count of the host.
+	PerfEventCPUCount int
+}
+
+// GetEbpfFuncName - Returns EbpfFuncName with the UID as a postfix if the Probe was copied
+func (p *Probe) GetEbpfFuncName() string {
+	if p.CopyProgram {
+		return fmt.Sprintf("%s_%s", p.EbpfFuncName, p.UID)
+	}
+	return p.EbpfFuncName
 }
 
 // Copy - Returns a copy of the current probe instance. Only the exported fields are copied.
 func (p *Probe) Copy() *Probe {
 	return &Probe{
-		UID:              p.UID,
-		Section:          p.Section,
-		AttachToFuncName: p.AttachToFuncName,
-		EbpfFuncName:     p.EbpfFuncName,
-		Enabled:          p.Enabled,
-		LinkPinPath:      p.LinkPinPath,
-		PinPath:          p.PinPath,
-		KProbeMaxActive:  p.KProbeMaxActive,
-		BinaryPath:       p.BinaryPath,
-		CGroupPath:       p.CGroupPath,
-		SocketFD:         p.SocketFD,
-		Ifindex:          p.Ifindex,
-		Ifname:           p.Ifname,
-		IfindexNetns:     p.IfindexNetns,
-		XDPAttachMode:    p.XDPAttachMode,
-		NetworkDirection: p.NetworkDirection,
-		ProbeRetry:       p.ProbeRetry,
-		ProbeRetryDelay:  p.ProbeRetryDelay,
+		UID:                p.UID,
+		EbpfFuncName:       p.EbpfFuncName,
+		Section:            p.Section,
+		AttachToFuncName:   p.AttachToFuncName,
+		UAddress:           p.UAddress,
+		AttachPID:          p.AttachPID,
+		LinkPinPath:        p.LinkPinPath,
+		Ifindex:            p.Ifindex,
+		Ifname:             p.Ifname,
+		IfindexNetns:       p.IfindexNetns,
+		SkipLoopback:       p.SkipLoopback,
+		CopyProgram:        p.CopyProgram,
+		KeepProgramSpec:    p.KeepProgramSpec,
+		SyscallFuncName:    p.SyscallFuncName,
+		MatchFuncName:      p.MatchFuncName,
+		HookFuncName:       p.HookFuncName,
+		TracepointCategory: p.TracepointCategory,
+		TracepointName:     p.TracepointName,
+		Enabled:            p.Enabled,
+		PinPath:            p.PinPath,
+		KProbeMaxActive:    p.KProbeMaxActive,
+		KprobeAttachMethod: p.KprobeAttachMethod,
+		UprobeAttachMethod: p.UprobeAttachMethod,
+		UprobeOffset:       p.UprobeOffset,
+		ProbeRetry:         p.ProbeRetry,
+		ProbeRetryDelay:    p.ProbeRetryDelay,
+		BinaryPath:         p.BinaryPath,
+		CGroupPath:         p.CGroupPath,
+		SocketFD:           p.SocketFD,
+		IfIndex:            p.IfIndex,
+		IfName:             p.IfName,
+		IfIndexNetns:       p.IfIndexNetns,
+		IfIndexNetnsID:     p.IfIndexNetnsID,
+		XDPAttachMode:      p.XDPAttachMode,
+		NetworkDirection:   p.NetworkDirection,
+		TCFilterHandle:     p.TCFilterHandle,
+		TCFilterPrio:       p.TCFilterPrio,
+		TCCleanupQDisc:     p.TCCleanupQDisc,
+		TCFilterProtocol:   p.TCFilterProtocol,
+		SamplePeriod:       p.SamplePeriod,
+		SampleFrequency:    p.SampleFrequency,
+		PerfEventType:      p.PerfEventType,
+		PerfEventPID:       p.PerfEventPID,
+		PerfEventConfig:    p.PerfEventConfig,
+		PerfEventCPUCount:  p.PerfEventCPUCount,
 	}
-}
-
-// checkField - Returns the last error that the probe encountered
-func (p *Probe) checkField() error {
-	if p.EbpfFuncName == "" || p.Section == "" {
-		return errors.New(fmt.Sprintf("EbpfFuncName:%s, Section:%s cant be null.", p.EbpfFuncName, p.Section))
-	}
-
-	//regex match 如果不是kprobe或uprobe，则直接允许为空
-	regexStr := `([ku](ret)?probe/)`
-	fnRegex := regexp.MustCompile(regexStr)
-	match := fnRegex.FindAllString(p.Section, -1)
-	if len(match) <= 0 {
-		return nil
-	}
-
-	if p.AttachToFuncName == "" {
-		return errors.New(fmt.Sprintf("AttachToFuncName:%s cant be null.", p.AttachToFuncName))
-	}
-	return nil
 }
 
 // GetLastError - Returns the last error that the probe encountered
@@ -263,24 +291,21 @@ func (p *Probe) GetLastError() error {
 	return p.lastError
 }
 
-// IdentificationPairMatches - Returns true if the identification pair (probe uid, probe section) matches.
-func (p *Probe) IdentificationPairMatches(id ProbeIdentificationPair) bool {
-	return p.GetIdentificationPair().Matches(id)
+// ID returns the system-wide unique ID for this program
+func (p *Probe) ID() uint32 {
+	p.stateLock.RLock()
+	defer p.stateLock.RUnlock()
+	return uint32(p.systemWideID)
 }
 
-// GetIdentificationPair - Returns the identification pair (probe section, probe UID)
-func (p *Probe) GetIdentificationPair() ProbeIdentificationPair {
-	return ProbeIdentificationPair{p.UID, p.EbpfFuncName}
-}
-
-// IsRunning - Returns true if the probe was successfully initialized, started and is currently running.
+// IsRunning - Returns true if the probe was successfully initialized, started and is currently running or paused.
 func (p *Probe) IsRunning() bool {
 	p.stateLock.RLock()
 	defer p.stateLock.RUnlock()
-	return p.state == running
+	return p.state == running || p.state == paused
 }
 
-// IsInitialized - Returns true if the probe was successfully initialized, started and is currently running.
+// IsInitialized - Returns true if the probe was successfully initialized.
 func (p *Probe) IsInitialized() bool {
 	p.stateLock.RLock()
 	defer p.stateLock.RUnlock()
@@ -301,73 +326,86 @@ func (p *Probe) Benchmark(in []byte, repeat int, reset func()) (uint32, time.Dur
 	return p.program.Benchmark(in, repeat, reset)
 }
 
-// InitWithOptions - Initializes a probe with options
-func (p *Probe) InitWithOptions(manager *Manager, manualLoadNeeded bool, checkPin bool) error {
+// initWithOptions - Initializes a probe with options
+func (p *Probe) initWithOptions(manager *Manager, manualLoadNeeded bool, checkPin bool) error {
 	if !p.Enabled {
+		p.cleanupProgramSpec()
 		return nil
 	}
-	p.manager = manager
+
 	p.stateLock.Lock()
 	defer p.stateLock.Unlock()
-	p.state = reset
 	p.manualLoadNeeded = manualLoadNeeded
 	p.checkPin = checkPin
-	return p.init()
+	return p.internalInit(manager)
 }
 
-// Init - Initialize a probe
-func (p *Probe) Init(manager *Manager) error {
+// init - Initialize a probe
+func (p *Probe) init(manager *Manager) error {
 	if !p.Enabled {
+		p.cleanupProgramSpec()
 		return nil
 	}
-	p.manager = manager
 	p.stateLock.Lock()
 	defer p.stateLock.Unlock()
-	p.state = reset
-	return p.init()
+	return p.internalInit(manager)
 }
 
 func (p *Probe) Program() *ebpf.Program {
 	return p.program
 }
 
-// init - Internal initialization function
-func (p *Probe) init() error {
-	err := p.checkField()
-	if err != nil {
+func (p *Probe) internalInit(manager *Manager) error {
+	if p.state >= initialized {
+		return nil
+	}
+
+	p.netlinkSocketCache = manager.netlinkSocketCache
+	if !manager.options.DiscardProgramSpecs {
+		p.KeepProgramSpec = true
+	}
+	if err := p.normalizeLegacyFields(); err != nil {
 		return err
 	}
-
+	p.state = reset
 	// Load spec if necessary
 	if p.manualLoadNeeded {
-		prog, err := ebpf.NewProgramWithOptions(p.programSpec, p.manager.options.VerifierOptions.Programs)
+		prog, err := ebpf.NewProgramWithOptions(p.programSpec, manager.options.VerifierOptions.Programs)
 		if err != nil {
 			p.lastError = err
-			return errors.New(fmt.Sprintf("error:%v , couldn't load new probe %v", err, p.GetIdentificationPair()))
+			var ve *ebpf.VerifierError
+			if errors.As(err, &ve) {
+				// include error twice to preserve context, and still allow unwrapping if desired
+				return fmt.Errorf("verifier error loading new probe %v: %w\n%+v", p.GetIdentificationPair(), err, ve)
+			}
+			return fmt.Errorf("couldn't load new probe %v: %w", p.GetIdentificationPair(), err)
 		}
 		p.program = prog
-	}
-
-	// override matchFuncName based on the CopyProgram parameter
-	matchFuncName := p.EbpfFuncName
-	if p.CopyProgram {
-		matchFuncName += p.UID
 	}
 
 	// Retrieve eBPF program if one isn't already set
 	if p.program == nil {
-		prog, ok := p.manager.collection.Programs[matchFuncName]
-		if !ok {
-			p.lastError = ErrUnknownMatchFuncName
-			return fmt.Errorf("error:%v,couldn't find program  %s ", ErrUnknownMatchFuncName, matchFuncName)
+		if p.program, p.lastError = manager.getProbeProgram(p.GetEbpfFuncName()); p.lastError != nil {
+			return fmt.Errorf("couldn't find program %s: %w", p.GetEbpfFuncName(), ErrUnknownSectionOrFuncName)
 		}
-		p.program = prog
 		p.checkPin = true
 	}
 
 	if p.programSpec == nil {
-		if p.programSpec, p.lastError = p.manager.getProbeProgramSpec(matchFuncName); p.lastError != nil {
-			return fmt.Errorf("error:%v, couldn't find program spec %s", ErrUnknownMatchFuncSpec, matchFuncName)
+		if p.programSpec, p.lastError = manager.getProbeProgramSpec(p.GetEbpfFuncName()); p.lastError != nil {
+			return fmt.Errorf("couldn't find program spec %s: %w", p.GetEbpfFuncName(), ErrUnknownSectionOrFuncName)
+		}
+	}
+	// Probe-local section overrides must not change another probe's shared spec.
+	if p.Section != "" && p.Section != p.programSpec.SectionName {
+		p.programSpec = p.programSpec.Copy()
+		p.programSpec.SectionName = p.Section
+	}
+
+	if p.programSpec.Type == ebpf.SchedCLS {
+		// sanity check
+		if p.NetworkDirection != Egress && p.NetworkDirection != Ingress {
+			return fmt.Errorf("%s has an invalid configuration: %w", p.GetIdentificationPair(), ErrNoNetworkDirection)
 		}
 	}
 
@@ -376,71 +414,154 @@ func (p *Probe) init() error {
 		if p.PinPath != "" {
 			if err := p.program.Pin(p.PinPath); err != nil {
 				p.lastError = err
-				return errors.New(fmt.Sprintf("error:%v , couldn't pin program %s at %s", err, matchFuncName, p.PinPath))
+				return fmt.Errorf("couldn't pin program %s at %s: %w", p.GetEbpfFuncName(), p.PinPath, err)
 			}
 		}
 		p.checkPin = false
 	}
 
-	// Find function name match if required
-	if strings.HasPrefix(p.Section, "kretprobe/") || (strings.HasPrefix(p.Section, "kprobe/")) {
-		// Update syscall function name with the correct arch prefix
-		p.funcName, err = GetSyscallFnNameWithSymFile(p.AttachToFuncName, p.manager.options.SymFile)
+	// Update syscall function name with the correct arch prefix
+	if p.HookFuncName == "" && p.AttachToFuncName != "" {
+		p.HookFuncName = p.AttachToFuncName
+		if strings.HasPrefix(p.programSpec.SectionName, "kprobe/") || strings.HasPrefix(p.programSpec.SectionName, "kretprobe/") {
+			resolved, err := GetSyscallFnNameWithSymFile(p.AttachToFuncName, manager.options.SymFile)
+			if err == nil {
+				p.HookFuncName = resolved
+			}
+			// Leave missing hook points to Attach and the activation selectors. Optional
+			// probes may legitimately be absent on an older kernel.
+		}
+	}
+
+	if p.SyscallFuncName != "" && len(p.HookFuncName) == 0 {
+		var err error
+		p.HookFuncName, err = GetSyscallFnNameWithSymFile(p.SyscallFuncName, manager.options.SymFile)
 		if err != nil {
 			p.lastError = err
-			p.funcName, err = FindFilterFunction(p.Section)
-			if err != nil {
-				p.lastError = err
-				return err
+			return err
+		}
+	}
+
+	if p.programSpec.Type == ebpf.Kprobe {
+		progType, _, _ := strings.Cut(p.programSpec.SectionName, "/")
+		switch progType {
+		case "kprobe":
+			p.kprobeType = kprobe
+		case "kretprobe":
+			p.kprobeType = kprobe
+			p.isReturnProbe = true
+		case "uprobe":
+			p.kprobeType = uprobe
+		case "uretprobe":
+			p.kprobeType = uprobe
+			p.isReturnProbe = true
+		}
+
+		// Find function name match if required
+		if p.MatchFuncName != "" && len(p.HookFuncName) == 0 {
+			// if this is a kprobe or a kretprobe, look for the symbol now
+			if p.kprobeType == kprobe {
+				var err error
+				p.HookFuncName, err = FindFilterFunction(p.MatchFuncName)
+				if err != nil {
+					p.lastError = err
+					return err
+				}
 			}
 		}
 	}
 
-	// Resolve interface index if one is provided
-	if p.Ifindex == 0 && p.Ifname != "" {
-		inter, err := net.InterfaceByName(p.Ifname)
-		if err != nil {
-			p.lastError = err
-			return errors.New(fmt.Sprintf("error:%v , couldn't find interface %v", err, p.Ifname))
-		}
+	if len(p.HookFuncName) == 0 {
+		// default back to the AttachTo field in Program, as parsed by Cilium
+		p.HookFuncName = p.programSpec.AttachTo
+	}
 
-		// Check if interface is loopback
-		isNetIfaceLo := inter.Flags&net.FlagLoopback == net.FlagLoopback
-		if isNetIfaceLo && p.SkipLoopback {
-			return fmt.Errorf("error:%v , interface %v is loopback and SkipLoopback is set", ErrLoopbackDisabled, p.Ifname)
-		}
+	// resolve netns ID from netns handle
+	if p.IfIndexNetns == 0 && p.IfIndexNetnsID != 0 || p.IfIndexNetns != 0 && p.IfIndexNetnsID == 0 {
+		return fmt.Errorf("both IfIndexNetns and IfIndexNetnsID are required if one is provided (IfIndexNetns: %d IfIndexNetnsID: %d)", p.IfIndexNetns, p.IfIndexNetnsID)
+	}
 
-		p.Ifindex = int32(inter.Index)
+	// set default TC classifier priority
+	if p.TCFilterPrio == 0 {
+		p.TCFilterPrio = DefaultTCFilterPriority
+	}
+
+	// set default TC classifier protocol
+	if p.TCFilterProtocol == 0 {
+		p.TCFilterProtocol = unix.ETH_P_ALL
 	}
 
 	// Default max active value
 	if p.KProbeMaxActive == 0 {
-		p.KProbeMaxActive = p.manager.options.DefaultKProbeMaxActive
+		p.KProbeMaxActive = manager.options.DefaultKProbeMaxActive
 	}
 
 	// Default retry
 	if p.ProbeRetry == 0 {
-		if p.manager.options.DefaultProbeRetry > 0 {
-			p.ProbeRetry = p.manager.options.DefaultProbeRetry
-		}
+		p.ProbeRetry = manager.options.DefaultProbeRetry
 	}
-	// account for the initial attempt
-	p.ProbeRetry++
 
 	// Default retry delay
 	if p.ProbeRetryDelay == 0 {
-		p.ProbeRetryDelay = p.manager.options.DefaultProbeRetryDelay
+		p.ProbeRetryDelay = manager.options.DefaultProbeRetryDelay
+	}
+
+	// fetch system-wide program ID, if the feature is available
+	if p.LinkPinPath != "" {
+		pinned, err := link.LoadPinnedLink(p.LinkPinPath, nil)
+		if err == nil {
+			info, infoErr := pinned.Info()
+			if infoErr != nil {
+				_ = pinned.Close()
+				return infoErr
+			}
+			program, progErr := ebpf.NewProgramFromID(info.Program)
+			if progErr != nil {
+				_ = pinned.Close()
+				return progErr
+			}
+			p.program, p.progLink = program, pinned
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("load pinned link: %w", err)
+		}
+	}
+	if p.program != nil {
+		programInfo, err := p.program.Info()
+		if err == nil {
+			p.programTag = programInfo.Tag
+			id, available := programInfo.ID()
+			if available {
+				p.systemWideID = int(id)
+			}
+		}
+	}
+
+	// set default kprobe attach method
+	if p.KprobeAttachMethod == AttachKprobeMethodNotSet {
+		p.KprobeAttachMethod = manager.options.DefaultKprobeAttachMethod
+		if p.KprobeAttachMethod == AttachKprobeMethodNotSet {
+			p.KprobeAttachMethod = AttachKprobeWithPerfEventOpen
+		}
+	}
+
+	// set default uprobe attach method
+	if p.UprobeAttachMethod == AttachMethodNotSet {
+		p.UprobeAttachMethod = manager.options.DefaultUprobeAttachMethod
+		if p.UprobeAttachMethod == AttachMethodNotSet {
+			p.UprobeAttachMethod = AttachWithPerfEventOpen
+		}
 	}
 
 	// update probe state
 	p.state = initialized
+	p.cleanupProgramSpec()
 	return nil
 }
 
 // Attach - Attaches the probe to the right hook point in the kernel depending on the program type and the provided
 // parameters.
 func (p *Probe) Attach() error {
-	return retry.Do(func() error {
+	return internal.Retry(func() error {
 		p.attachRetryAttempt++
 		err := p.attach()
 		if err == nil {
@@ -453,14 +574,22 @@ func (p *Probe) Attach() error {
 		}
 
 		return err
-	}, retry.Attempts(p.ProbeRetry), retry.Delay(p.ProbeRetryDelay), retry.LastErrorOnly(true))
+	}, p.getRetryAttemptCount(), p.ProbeRetryDelay)
+}
+
+func (p *Probe) Pause() error {
+	return p.pause()
+}
+
+func (p *Probe) Resume() error {
+	return p.resume()
 }
 
 // attach - Thread unsafe version of attach
 func (p *Probe) attach() error {
 	p.stateLock.Lock()
 	defer p.stateLock.Unlock()
-	if p.state >= running || !p.Enabled {
+	if p.state >= paused || !p.Enabled {
 		return nil
 	}
 	if p.state < initialized {
@@ -470,16 +599,29 @@ func (p *Probe) attach() error {
 		return ErrProbeNotInitialized
 	}
 
+	p.attachPID = Getpid()
+	if p.progLink != nil && p.LinkPinPath != "" {
+		p.state = running
+		return nil
+	}
+
 	// Per program type start
 	var err error
 	switch p.programSpec.Type {
 	case ebpf.UnspecifiedProgram:
-		err = fmt.Errorf("error:%v, %s", ErrSectionFormat, "invalid program type, make sure to use the right section prefix")
+		err = fmt.Errorf("invalid program type, make sure to use the right section prefix: %w", ErrSectionFormat)
 	case ebpf.Kprobe:
-		err = p.attachKprobe()
+		switch p.kprobeType {
+		case kprobe:
+			err = p.attachKprobe()
+		case uprobe:
+			err = p.attachUprobe()
+		}
 	case ebpf.TracePoint:
 		err = p.attachTracepoint()
-	case ebpf.CGroupDevice, ebpf.CGroupSKB, ebpf.CGroupSock, ebpf.SockOps, ebpf.CGroupSockAddr, ebpf.CGroupSockopt, ebpf.CGroupSysctl:
+	case ebpf.RawTracepoint, ebpf.RawTracepointWritable:
+		err = p.attachRawTracepoint()
+	case ebpf.CGroupDevice, ebpf.CGroupSKB, ebpf.CGroupSock, ebpf.CGroupSockAddr, ebpf.CGroupSockopt, ebpf.CGroupSysctl, ebpf.SockOps:
 		err = p.attachCGroup()
 	case ebpf.SocketFilter:
 		err = p.attachSocket()
@@ -487,28 +629,114 @@ func (p *Probe) attach() error {
 		err = p.attachTCCLS()
 	case ebpf.XDP:
 		err = p.attachXDP()
-	case ebpf.RawTracepoint:
-		err = p.attachRawTracepoint()
 	case ebpf.LSM:
-		err = p.attachLsm()
+		err = p.attachLSM()
+	case ebpf.PerfEvent:
+		err = p.attachPerfEvent()
+	case ebpf.Tracing:
+		err = p.attachTracing()
 	default:
 		err = fmt.Errorf("program type %s not implemented yet", p.programSpec.Type)
+	}
+	if err == nil && p.LinkPinPath != "" {
+		if pinned, ok := p.progLink.(interface{ Pin(string) error }); ok {
+			err = pinned.Pin(p.LinkPinPath)
+		} else {
+			err = fmt.Errorf("attachment does not support link pinning: %w", ErrNotSupported)
+		}
 	}
 	if err != nil {
 		p.lastError = err
 		// Clean up any progress made in the attach attempt
 		_ = p.stop(false)
-		return errors.New(fmt.Sprintf("error:%v , couldn't start probe %s", err, p.EbpfFuncName))
+		return fmt.Errorf("couldn't start probe %s: %w", p.GetIdentificationPair(), err)
 	}
-	if p.LinkPinPath != "" && p.link != nil {
-		err := p.link.Pin(p.LinkPinPath)
-		if err != nil {
-			return errors.New(fmt.Sprintf("error:%v , couldn't pin link %s", err, p.LinkPinPath))
-		}
-	}
+
 	// update probe state
 	p.state = running
-	p.attachRetryAttempt = p.ProbeRetry
+	p.attachRetryAttempt = p.getRetryAttemptCount()
+	return nil
+}
+
+func (p *Probe) Iterator() (io.ReadCloser, error) {
+	p.stateLock.RLock()
+	defer p.stateLock.RUnlock()
+	if p.state <= paused || !p.Enabled {
+		return nil, ErrManagerNotStarted
+	}
+	if p.programSpec.AttachType != ebpf.AttachTraceIter {
+		return nil, fmt.Errorf("invalid program attach type %s", p.programSpec.AttachType)
+	}
+	it, ok := p.progLink.(*link.Iter)
+	if !ok {
+		return nil, fmt.Errorf("invalid program attach type %T", p.progLink)
+	}
+	return it.Open()
+}
+
+// cleanupProgramSpec - Cleans up the internal ProgramSpec attribute to free up some memory
+func (p *Probe) cleanupProgramSpec() {
+	if p.KeepProgramSpec {
+		return
+	}
+	cleanupProgramSpec(p.programSpec)
+}
+
+func (p *Probe) pause() error {
+	p.stateLock.Lock()
+	defer p.stateLock.Unlock()
+	if p.state <= paused || !p.Enabled {
+		return nil
+	}
+
+	v, ok := p.progLink.(pauser)
+	if ok {
+		if err := v.Pause(); err != nil {
+			p.lastError = err
+			return fmt.Errorf("error pausing probe %s: %w", p.GetIdentificationPair(), err)
+		}
+		p.state = paused
+		return nil
+	}
+
+	if p.bypassIndex > 0 && p.bypassMap != nil {
+		if err := p.bypassMap.array.Update(p.bypassIndex, bypassValue, ebpf.UpdateExist); err != nil {
+			return err
+		}
+		p.state = paused
+		return nil
+	}
+	return nil
+}
+
+func (p *Probe) resume() error {
+	p.stateLock.Lock()
+	defer p.stateLock.Unlock()
+	if p.state != paused || !p.Enabled {
+		return nil
+	}
+
+	v, ok := p.progLink.(pauser)
+	if ok {
+		if err := v.Resume(); err != nil {
+			p.lastError = err
+			return fmt.Errorf("error resuming probe %s: %w", p.GetIdentificationPair(), err)
+		}
+		p.state = running
+		return nil
+	}
+
+	if err := p.disableBypass(); err != nil {
+		return err
+	}
+	p.state = running
+	return nil
+}
+
+func (p *Probe) disableBypass() error {
+	if p.bypassIndex > 0 && p.bypassMap != nil {
+		return p.bypassMap.array.Update(p.bypassIndex, enableValue, ebpf.UpdateExist)
+	}
 	return nil
 }
 
@@ -517,7 +745,7 @@ func (p *Probe) attach() error {
 func (p *Probe) Detach() error {
 	p.stateLock.Lock()
 	defer p.stateLock.Unlock()
-	if p.state < running || !p.Enabled {
+	if p.state < paused || !p.Enabled {
 		return nil
 	}
 
@@ -531,42 +759,36 @@ func (p *Probe) Detach() error {
 		p.state = initialized
 	}
 
+	_ = p.disableBypass()
 	return err
 }
 
 // detachRetry - Thread unsafe version of Detach with retry
 func (p *Probe) detachRetry() error {
-	return retry.Do(p.detach, retry.Attempts(p.ProbeRetry), retry.Delay(p.ProbeRetryDelay), retry.LastErrorOnly(true))
+	return internal.Retry(p.detach, p.getRetryAttemptCount(), p.ProbeRetryDelay)
 }
 
 // detach - Thread unsafe version of Detach.
 func (p *Probe) detach() error {
-	var err error
-	// Remove pin if needed
-	if p.PinPath != "" {
-		err = ConcatErrors(err, os.Remove(p.PinPath))
-	}
+	err := p.program.Unpin()
 
-	// Shared with all probes: close the perf event file descriptor
-	if p.link != nil {
-		err = p.link.Close()
-	}
 	// Per program type cleanup
 	switch p.programSpec.Type {
 	case ebpf.UnspecifiedProgram:
 		// nothing to do
 		break
-	case ebpf.Kprobe:
-	case ebpf.CGroupDevice, ebpf.CGroupSKB, ebpf.CGroupSock, ebpf.CGroupSockAddr, ebpf.CGroupSockopt, ebpf.CGroupSysctl:
-	case ebpf.SocketFilter:
-		err = ConcatErrors(err, p.detachSocket())
 	case ebpf.SchedCLS:
-		err = ConcatErrors(err, p.detachTCCLS())
-	case ebpf.XDP:
-		err = ConcatErrors(err, p.detachXDP())
+		err = errors.Join(err, p.detachTCCLS())
 	default:
-		// unsupported section, nothing to do either
-		break
+		if p.progLink != nil {
+			if p.LinkPinPath != "" {
+				if pinned, ok := p.progLink.(interface{ Unpin() error }); ok {
+					err = errors.Join(err, pinned.Unpin())
+				}
+			}
+			err = errors.Join(err, p.progLink.Close())
+			p.progLink = nil
+		}
 	}
 	return err
 }
@@ -575,7 +797,7 @@ func (p *Probe) detach() error {
 func (p *Probe) Stop() error {
 	p.stateLock.Lock()
 	defer p.stateLock.Unlock()
-	if p.state < running || !p.Enabled {
+	if p.state < paused || !p.Enabled {
 		p.reset()
 		return nil
 	}
@@ -587,340 +809,45 @@ func (p *Probe) stop(saveStopError bool) error {
 	err := p.detachRetry()
 
 	// close the loaded program
-	if p.attachRetryAttempt >= p.ProbeRetry {
-		err = ConcatErrors(err, p.program.Close())
+	if p.attachRetryAttempt >= p.getRetryAttemptCount() {
+		err = errors.Join(err, p.program.Close())
 	}
+
 	// update state of the probe
 	if saveStopError {
-		p.lastError = ConcatErrors(p.lastError, err)
+		p.lastError = errors.Join(p.lastError, err)
 	}
 
 	// Cleanup probe if stop was successful
-	if err == nil {
-		if p.attachRetryAttempt >= p.ProbeRetry {
-			p.reset()
-		}
-		return nil
+	if err == nil && p.attachRetryAttempt >= p.getRetryAttemptCount() {
+		p.reset()
 	}
-	return errors.New(fmt.Sprintf("error:%v , couldn't stop probe %s", err, p.EbpfFuncName))
+	if err != nil {
+		return fmt.Errorf("couldn't stop probe %s: %w", p.GetIdentificationPair(), err)
+	}
+	return nil
 }
 
 // reset - Cleans up the internal fields of the probe
 func (p *Probe) reset() {
-	p.manager = nil
+	p.kprobeType = kprobe
+	p.isReturnProbe = false
+	p.netlinkSocketCache = nil
 	p.program = nil
 	p.programSpec = nil
-	//p.perfEventFD = nil
-	p.link = nil
+	p.progLink = nil
 	p.state = reset
 	p.manualLoadNeeded = false
 	p.checkPin = false
-	p.funcName = ""
-	p.AttachPID = 0
+	p.attachPID = 0
 	p.attachRetryAttempt = 0
+	p.kprobeHookPointNotExist = false
+	p.systemWideID = 0
+	p.programTag = ""
+	p.tcFilter = netlink.BpfFilter{}
+	p.tcClsActQdisc = nil
 }
 
-// attachKprobe - Attaches the probe to its kprobe
-func (p *Probe) attachKprobe() error {
-	// Prepare kprobe_events line parameters
-	var err error
-	funcName := p.funcName
-	isRet := false
-	if strings.HasPrefix(p.Section, "kretprobe/") {
-		isRet = true
-	} else if strings.HasPrefix(p.Section, "kprobe/") {
-		isRet = false
-	} else {
-		// this might actually be a Uprobe
-		return p.attachUprobe()
-	}
-
-	var kp link.Link
-	if isRet {
-		kp, err = link.Kretprobe(funcName, p.program, nil)
-	} else {
-		kp, err = link.Kprobe(funcName, p.program, nil)
-	}
-
-	if err != nil {
-		return fmt.Errorf("opening Kprobe: %s, funcName:%s, isRet:%t, section:%s", err, funcName, isRet, p.Section)
-	}
-	p.link = kp
-	return nil
-}
-
-// attachTracepoint - Attaches the probe to its tracepoint
-func (p *Probe) attachTracepoint() error {
-	// Parse section
-	traceGroup := strings.SplitN(p.programSpec.SectionName, "/", 3)
-	if len(traceGroup) != 3 {
-		return fmt.Errorf("error:%v, expected SEC(\"tracepoint/[category]/[name]\") got %s", ErrSectionFormat, p.programSpec.SectionName)
-	}
-	category := traceGroup[1]
-	name := traceGroup[2]
-
-	kp, err := link.Tracepoint(category, name, p.program, nil)
-	if err != nil {
-		return errors.New(fmt.Sprintf("error:%v , couldn's activate tracepoint %s, matchFuncName:%s", err, p.Section, p.EbpfFuncName))
-	}
-	p.link = kp
-	return nil
-}
-
-// attachUprobe - Attaches the probe to its Uprobe
-func (p *Probe) attachUprobe() error {
-	// Prepare uprobe_events line parameters
-	//var funcName string
-	var isRet bool
-	if strings.HasPrefix(p.Section, "uretprobe/") {
-		//funcName = strings.TrimPrefix(p.Section, "uretprobe/")
-		isRet = true
-	} else if strings.HasPrefix(p.Section, "uprobe/") {
-		//funcName = strings.TrimPrefix(p.Section, "uprobe/")
-	} else {
-		// unknown type
-		return fmt.Errorf("error:%v, program type unrecognized in section %v", ErrSectionFormat, p.Section)
-	}
-
-	p.funcName = p.AttachToFuncName
-
-	ex, err := link.OpenExecutable(p.BinaryPath)
-	if err != nil {
-		return errors.New(fmt.Sprintf("error:%v , couldn't enable uprobe %s", err, p.EbpfFuncName))
-	}
-	opts := &link.UprobeOptions{
-		Offset:  p.UprobeOffset,
-		Address: p.UAddress,
-		PID:     p.AttachPID,
-	}
-
-	var kp link.Link
-	if isRet {
-		kp, err = ex.Uretprobe(p.funcName, p.program, opts)
-	} else {
-		kp, err = ex.Uprobe(p.funcName, p.program, opts)
-	}
-	if err != nil {
-		return fmt.Errorf("opening uprobe: %s , isRet:%t, opts:%v", err, isRet, opts)
-	}
-	p.link = kp
-	return nil
-}
-
-// attachCGroup - Attaches the probe to a cgroup hook point
-func (p *Probe) attachCGroup() error {
-	if p.CGroupPath == "" {
-		return errors.New("CGroupPath cant be empty.")
-	}
-
-	opts := link.CgroupOptions{
-		Path:    p.CGroupPath,
-		Attach:  p.programSpec.AttachType,
-		Program: p.program,
-	}
-	kp, err := link.AttachCgroup(opts)
-	if err != nil {
-		return errors.New(fmt.Sprintf("error:%v , failed to attach probe %v to cgroup %s, attach type:%s", err, p.GetIdentificationPair(), p.CGroupPath, p.programSpec.AttachType.String()))
-	}
-
-	p.link = kp
-	return nil
-}
-
-// attachSocket - Attaches the probe to the provided socket
-func (p *Probe) attachSocket() error {
-	return sockAttach(p.SocketFD, p.program.FD())
-}
-
-// detachSocket - Detaches the probe from its socket
-func (p *Probe) detachSocket() error {
-	return sockDetach(p.SocketFD, p.program.FD())
-}
-
-func (p *Probe) buildTCClsActQdisc() netlink.Qdisc {
-	if p.tcClsActQdisc == nil {
-		p.tcClsActQdisc = &netlink.GenericQdisc{
-			QdiscType: "clsact",
-			QdiscAttrs: netlink.QdiscAttrs{
-				LinkIndex: int(p.Ifindex),
-				Handle:    netlink.MakeHandle(0xffff, 0),
-				Parent:    netlink.HANDLE_INGRESS,
-			},
-		}
-	}
-	return p.tcClsActQdisc
-}
-func (p *Probe) getTCFilterParentHandle() uint32 {
-	return netlink.MakeHandle(clsactQdisc, uint16(p.NetworkDirection))
-}
-func (p *Probe) buildTCFilter() (netlink.BpfFilter, error) {
-	if p.tcFilter.FilterAttrs.LinkIndex == 0 {
-		var filterName string
-		filterName, err := generateTCFilterName(p.UID, p.programSpec.SectionName, p.attachPID)
-		if err != nil {
-			return p.tcFilter, fmt.Errorf("couldn't create TC filter for %v: %w", p.EbpfFuncName, err)
-		}
-		p.tcFilter = netlink.BpfFilter{
-			FilterAttrs: netlink.FilterAttrs{
-				LinkIndex: int(p.Ifindex),
-				Parent:    p.getTCFilterParentHandle(),
-				Handle:    p.TCFilterHandle,
-				Priority:  p.TCFilterPrio,
-				Protocol:  p.TCFilterProtocol,
-			},
-			Fd:           p.program.FD(),
-			Name:         filterName,
-			DirectAction: true,
-		}
-	}
-	return p.tcFilter, nil
-}
-
-// attachTCCLS - Attaches the probe to its TC classifier hook point
-func (p *Probe) attachTCCLS() error {
-	var err error
-	// Make sure Ifindex is properly set
-	if p.Ifindex == 0 && p.Ifname == "" {
-		return ErrInterfaceNotSet
-	}
-
-	// Recover the netlink socket of the interface from the manager
-	ntl, ok := p.manager.netlinkCache[netlinkCacheKey{p.Ifindex, p.IfindexNetns}]
-	if !ok {
-		// Set up new netlink connection
-		ntl, err = p.manager.newNetlinkConnection(p.Ifindex, p.IfindexNetns)
-		if err != nil {
-			return err
-		}
-	}
-
-	// Create a Qdisc for the provided interface
-	qdisc := &tc.Object{
-		Msg: tc.Msg{
-			Family:  unix.AF_UNSPEC,
-			Ifindex: uint32(p.Ifindex),
-			Handle:  core.BuildHandle(tc.HandleRoot, 0x0000),
-			Parent:  tc.HandleIngress,
-			Info:    0,
-		},
-		Attribute: tc.Attribute{
-			Kind: "clsact",
-		},
-	}
-
-	// Add the Qdisc
-	err = ntl.rtNetlink.Qdisc().Add(qdisc)
-	if err != nil {
-		if err.Error() != "netlink receive: file exists" {
-			return errors.New(fmt.Sprintf("error:%v , couldn't add a \", err clsact\" qdisc to interface %v", err, p.Ifindex))
-		}
-	}
-
-	// Create qdisc filter
-	fd := uint32(p.program.FD())
-	flag := uint32(1)
-	filter := tc.Object{
-		Msg: tc.Msg{
-			Family:  unix.AF_UNSPEC,
-			Ifindex: uint32(p.Ifindex),
-			Handle:  0,
-			Parent:  core.BuildHandle(tc.HandleRoot, uint32(p.NetworkDirection)),
-			Info:    0x300,
-		},
-		Attribute: tc.Attribute{
-			Kind: "bpf",
-			BPF: &tc.Bpf{
-				FD:    &fd,
-				Name:  &p.Section,
-				Flags: &flag,
-			},
-		},
-	}
-
-	// Add qdisc filter
-	err = ntl.rtNetlink.Filter().Add(&filter)
-	if err == nil {
-		p.tcObject = qdisc
-		ntl.schedClsCount += 1
-		return nil
-	}
-	return errors.New(fmt.Sprintf("error:%v , couldn't add a %v filter to interface %v: %v", err, p.NetworkDirection, p.Ifindex, err))
-}
-
-// detachTCCLS - Detaches the probe from its TC classifier hook point
-func (p *Probe) detachTCCLS() error {
-	// Recover the netlink socket of the interface from the manager
-	ntl, ok := p.manager.netlinkCache[netlinkCacheKey{p.Ifindex, p.IfindexNetns}]
-	if !ok {
-		return fmt.Errorf("couldn't find qdisc from which the probe %v was meant to be detached", p.GetIdentificationPair())
-	}
-
-	if ntl.schedClsCount >= 2 {
-		ntl.schedClsCount -= 1
-		// another classifier is still using the qdisc, do not delete it yet
-		return nil
-	}
-
-	// Delete qdisc
-	err := ntl.rtNetlink.Qdisc().Delete(p.tcObject)
-	if err == nil {
-		return nil
-	}
-	return errors.New(fmt.Sprintf("error:%v , couldn't detach TC classifier of probe %v", err, p.GetIdentificationPair()))
-}
-
-// attachXDP - Attaches the probe to an interface with an XDP hook point
-func (p *Probe) attachXDP() error {
-	// Lookup interface
-	nlink, err := netlink.LinkByIndex(int(p.Ifindex))
-	if err != nil {
-		return errors.New(fmt.Sprintf("error:%v , couldn't retrieve interface %v", err, p.Ifindex))
-	}
-
-	// Attach program
-	err = netlink.LinkSetXdpFdWithFlags(nlink, p.program.FD(), int(p.XDPAttachMode))
-	if err == nil {
-		return nil
-	}
-	return errors.New(fmt.Sprintf("error:%v , couldn't attach XDP program %v to interface %v", err, p.GetIdentificationPair(), p.Ifindex))
-}
-
-// detachXDP - Detaches the probe from its XDP hook point
-func (p *Probe) detachXDP() error {
-	// Lookup interface
-	nlink, err := netlink.LinkByIndex(int(p.Ifindex))
-	if err != nil {
-		return errors.New(fmt.Sprintf("error:%v , couldn't retrieve interface %v", err, p.Ifindex))
-	}
-
-	// Detach program
-	err = netlink.LinkSetXdpFdWithFlags(nlink, -1, int(p.XDPAttachMode))
-	if err == nil {
-		return nil
-	}
-	return errors.New(fmt.Sprintf("error:%v , couldn't detach XDP program %v from interface %v", err, p.GetIdentificationPair(), p.Ifindex))
-}
-
-// attachRawTracepoint - Attaches the probe to its raw_tracepoint
-func (p *Probe) attachRawTracepoint() error {
-	name := strings.TrimLeft(p.Section, "raw_tracepoint/")
-	link, err := link.AttachRawTracepoint(link.RawTracepointOptions{
-		Name:    name,
-		Program: p.program,
-	})
-	if err != nil {
-		return errors.New(fmt.Sprintf("error:%v , couldn's activate raw_tracepoint %s, matchFuncName:%s", err, p.Section, p.EbpfFuncName))
-	}
-	p.link = link
-	return nil
-}
-
-// attachLsm - Attaches the probe to its lsm hook
-func (p *Probe) attachLsm() error {
-	link, err := link.AttachLSM(link.LSMOptions{Program: p.program})
-	if err != nil {
-		return errors.New(fmt.Sprintf("error:%v , couldn's activate lsm %s, matchFuncName:%s", err, p.Section, p.EbpfFuncName))
-	}
-	p.link = link
-	return nil
+func (p *Probe) getRetryAttemptCount() uint {
+	return p.ProbeRetry + 1
 }

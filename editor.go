@@ -1,23 +1,25 @@
 package manager
 
 import (
+	"errors"
 	"fmt"
+
 	"github.com/cilium/ebpf/asm"
 )
 
-// Editor modifies eBPF instructions.
-type Editor struct {
+// editor modifies eBPF instructions.
+type editor struct {
 	instructions     *asm.Instructions
 	ReferenceOffsets map[string][]int
 }
 
-// Edit creates a new Editor.
+// newEditor creates a new editor.
 //
 // The editor retains a reference to insns and modifies its
 // contents.
-func Edit(insns *asm.Instructions) *Editor {
+func newEditor(insns *asm.Instructions) *editor {
 	refs := insns.ReferenceOffsets()
-	return &Editor{insns, refs}
+	return &editor{insns, refs}
 }
 
 // RewriteConstant rewrites all loads of a symbol to a constant value.
@@ -27,23 +29,24 @@ func Edit(insns *asm.Instructions) *Editor {
 //
 // The following macro should be used to access the constant:
 //
-//    #define LOAD_CONSTANT(param, var) asm("%0 = " param " ll" : "=r"(var))
+//	#define LOAD_CONSTANT(param, var) asm("%0 = " param " ll" : "=r"(var))
 //
-//    int xdp() {
-//        bool my_constant;
-//        LOAD_CONSTANT("SYMBOL_NAME", my_constant);
+//	int xdp() {
+//	    bool my_constant;
+//	    LOAD_CONSTANT("SYMBOL_NAME", my_constant);
 //
-//        if (my_constant) ...
+//	    if (my_constant) ...
 //
 // Caveats:
+//
 //   - The symbol name you pick must be unique
 //
 //   - Failing to rewrite a symbol will not result in an error,
 //     0 will be loaded instead (subject to change)
 //
-// Use IsUnreferencedSymbol if you want to rewrite potentially
+// Use isUnreferencedSymbol if you want to rewrite potentially
 // unused symbols.
-func (ed *Editor) RewriteConstant(symbol string, value uint64) error {
+func (ed *editor) RewriteConstant(symbol string, value uint64) error {
 	indices := ed.ReferenceOffsets[symbol]
 	if len(indices) == 0 {
 		return &unreferencedSymbolError{symbol}
@@ -69,9 +72,9 @@ func (use *unreferencedSymbolError) Error() string {
 	return fmt.Sprintf("unreferenced symbol %s", use.symbol)
 }
 
-// IsUnreferencedSymbol returns true if err was caused by
+// isUnreferencedSymbol returns true if err was caused by
 // an unreferenced symbol.
-func IsUnreferencedSymbol(err error) bool {
-	_, ok := err.(*unreferencedSymbolError)
-	return ok
+func isUnreferencedSymbol(err error) bool {
+	var ue *unreferencedSymbolError
+	return errors.As(err, &ue)
 }

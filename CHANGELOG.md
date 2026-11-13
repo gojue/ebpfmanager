@@ -1,5 +1,7 @@
-# Unreleased
+# v0.7.0 (2026-11-14)
 
+* Merge [PR #51](https://github.com/gojue/ebpfmanager/pull/51) into master on
+  2026-11-14 (Asia/Shanghai), at `6f15756b340352535bded72e5e18f5ad2ce693aa`.
 * Manually synchronize the core implementation and regression fixtures with
   DataDog/ebpf-manager main at `ecf203d78b8777fb7f61e77062a30eb7b1b70b3f`
   (2026-10-29), following the previous `467114a3` / upstream `31843479` sync.
@@ -13,11 +15,14 @@
 * Keep the fork module path, Go 1.26.0 baseline, custom examples and kernel
   helpers. Retain upstream license attribution in `LICENSE.upstream`.
 * Add compatibility regressions and run CI using the Go version in `go.mod`,
-  generated test fixtures and the race detector. Example programs are compiled
-  by `go test ./...`; interactive demos are not launched by CI.
-* Validate unchanged eCapture callers on Linux arm64: race tests, production
-  lint, clean CO-RE/non-CO-RE/combined builds, 99 TLS E2E cases and three auxiliary
-  probe cases. See the README for the tested source revision and coverage limits.
+  generated test fixtures and the race detector. A separate job builds and runs
+  all 20 examples in isolated namespaces on pushes and pull requests.
+* Validate unchanged eCapture callers on Linux arm64 and loong64, including
+  clean CO-RE/non-CO-RE/combined builds and production lint. The 114-case E2E
+  matrix passes on arm64; loong64 retains failures also reproduced with the old
+  manager. See the README for tested revisions, root causes and coverage limits.
+
+**Full Changelog**: [v0.6.0...v0.7.0](https://github.com/gojue/ebpfmanager/compare/v0.6.0...v0.7.0)
 
 <hr>
 

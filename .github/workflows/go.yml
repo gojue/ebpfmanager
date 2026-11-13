@@ -2,25 +2,25 @@ name: Go-test
 
 on:
   push:
-    branches: [ master ]
   pull_request:
-    branches: [ master ]
+  workflow_dispatch:
 
 jobs:
 
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: 1.24.1
+          go-version-file: go.mod
       - name: Install Compilers
         run: |
           sudo apt-get update
           sudo apt-get install --yes build-essential pkgconf libelf-dev llvm clang linux-tools-common linux-tools-generic
-          go get -u github.com/shuLhan/go-bindata/...
         shell: bash
       - name: Network Interface
         run: |
@@ -28,6 +28,36 @@ jobs:
           ip -o -4 route show to default
       - name: Test
         run: |
-          go test -exec sudo ./...
-          cd examples/
-          sh test.sh
+          make -C testdata
+          go test -race -exec sudo ./...
+
+  examples:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Install example dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes build-essential clang llvm libelf-dev linux-tools-common linux-tools-generic iproute2
+          # Ubuntu's /usr/bin/bpftool wrapper requires a package matching the
+          # runner kernel. Follow the generic package's symlinks to its binary.
+          bpftool_path=$(find -L /usr/lib/linux-tools -type f -name bpftool | sort -V | tail -n 1)
+          if [[ -z "$bpftool_path" ]]; then
+            echo "No bpftool binary found in the installed linux-tools packages" >&2
+            exit 1
+          fi
+          sudo install -m 755 "$bpftool_path" /usr/local/bin/bpftool
+          sudo /usr/local/bin/bpftool version
+      - name: Build and run all examples
+        run: bash .github/scripts/test-examples.sh

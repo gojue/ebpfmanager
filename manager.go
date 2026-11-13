@@ -4,155 +4,27 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
-	"strings"
+	"slices"
 	"sync"
 	"time"
 
-	"github.com/cilium/ebpf"
-	"github.com/cilium/ebpf/link"
-	"github.com/florianl/go-tc"
-	"github.com/hashicorp/go-multierror"
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/sys/unix"
+
+	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/asm"
+	"github.com/cilium/ebpf/features"
+	"github.com/cilium/ebpf/rlimit"
 )
 
-// ConstantEditor - A constant editor tries to rewrite the value of a constant in a compiled eBPF program.
-//
-// Constant edition only works before the eBPF programs are loaded in the kernel, and therefore before the
-// Manager is started. If no program sections are provided, the manager will try to edit the constant in all eBPF programs.
-type ConstantEditor struct {
-	// Name - Name of the constant to rewrite
-	Name string
-
-	// Value - Value to write in the eBPF bytecode. When using the asm load method, the Value has to be a uint64.
-	Value interface{}
-
-	// FailOnMissing - If FailOMissing is set to true, the constant edition process will return an error if the constant
-	// was missing in at least one program
-	FailOnMissing bool
-
-	// ProbeIdentificationPairs - Identifies the list of programs to edit. If empty, it will apply to all the programs
-	// of the manager. Will return an error if at least one edition failed.
-	ProbeIdentificationPairs []ProbeIdentificationPair
-}
-
-// TailCallRoute - A tail call route defines how tail calls should be routed between eBPF programs.
-//
-// The provided eBPF program will be inserted in the provided eBPF program array, at the provided key. The eBPF program
-// can be provided by its section or by its *ebpf.Program representation.
-type TailCallRoute struct {
-	// ProgArrayName - Name of the BPF_MAP_TYPE_PROG_ARRAY map as defined in its section SEC("maps/[ProgArray]")
-	ProgArrayName string
-
-	// Key - Key at which the program will be inserted in the ProgArray map
-	Key uint32
-
-	// ProbeIdentificationPair - Selector of the program to insert in the ProgArray map
-	ProbeIdentificationPair ProbeIdentificationPair
-
-	// Program - Program to insert in the ProgArray map
-	Program *ebpf.Program
-}
-
-// MapRoute - A map route defines how multiple maps should be routed between eBPF programs.
-//
-// The provided eBPF map will be inserted in the provided eBPF array of maps (or hash of maps), at the provided key. The
-// inserted eBPF map can be provided by its section or by its *ebpf.Map representation.
-type MapRoute struct {
-	// RoutingMapName - Name of the BPF_MAP_TYPE_ARRAY_OF_MAPS or BPF_MAP_TYPE_HASH_OF_MAPS map, as defined in its
-	// section SEC("maps/[RoutingMapName]")
-	RoutingMapName string
-
-	// Key - Key at which the program will be inserted in the routing map
-	Key interface{}
-
-	// RoutedName - Section of the map that will be inserted
-	RoutedName string
-
-	// Map - Map to insert in the routing map
-	Map *ebpf.Map
-}
-
-// MapSpecEditorFlag - Flag used to specify what a MapSpecEditor should edit.
-type MapSpecEditorFlag uint
-
-const (
-	EditType       MapSpecEditorFlag = 1 << 1
-	EditMaxEntries MapSpecEditorFlag = 1 << 2
-	EditFlags      MapSpecEditorFlag = 1 << 3
-	EditInnerMap   MapSpecEditorFlag = 1 << 4
-)
-
-// MapSpecEditor - A MapSpec editor defines how specific parameters of specific maps should be updated at runtime
-//
-// For example, this can be used if you need to change the max_entries of a map before it is loaded in the kernel, but
-// you don't know what this value should be initially.
-type MapSpecEditor struct {
-	// Type - Type of the map.
-	Type ebpf.MapType
-	// MaxEntries - Max Entries of the map.
-	MaxEntries uint32
-	// Flags - Flags provided to the kernel during the loading process.
-	Flags uint32
-	// EditorFlag - Use this flag to specify what fields should be updated. See MapSpecEditorFlag.
-	EditorFlag MapSpecEditorFlag
-
-	// InnerMap
-	InnerMap *ebpf.MapSpec
-}
-
-// ProbesSelector - A probe selector defines how a probe (or a group of probes) should be activated.
-//
-// For example, this can be used to specify that out of a group of optional probes, at least one should be activated.
-type ProbesSelector interface {
-	// GetProbesIdentificationPairList - Returns the list of probes that this selector activates
-	GetProbesIdentificationPairList() []ProbeIdentificationPair
-	// RunValidator - Ensures that the probes that were successfully activated follow the selector goal.
-	// For example, see OneOf.
-	RunValidator(manager *Manager) error
-	// EditProbeIdentificationPair - Changes all the selectors looking for the old ProbeIdentificationPair so that they
-	// mow select the new one
-	EditProbeIdentificationPair(old ProbeIdentificationPair, new ProbeIdentificationPair)
-}
-
-// ProbeSelector - This selector is used to unconditionally select a probe by its identification pair and validate
-// that it is activated
-type ProbeSelector struct {
-	ProbeIdentificationPair
-}
-
-// GetProbesIdentificationPairList - Returns the list of probes that this selector activates
-func (ps *ProbeSelector) GetProbesIdentificationPairList() []ProbeIdentificationPair {
-	return []ProbeIdentificationPair{ps.ProbeIdentificationPair}
-}
-
-// RunValidator - Ensures that the probes that were successfully activated follow the selector goal.
-// For example, see OneOf.
-func (ps *ProbeSelector) RunValidator(manager *Manager) error {
-	p, ok := manager.GetProbe(ps.ProbeIdentificationPair)
-	if !ok {
-		return fmt.Errorf("probe not found: %s", ps.ProbeIdentificationPair)
-	}
-	if !p.IsRunning() && p.Enabled {
-		if p.GetLastError() != nil {
-			return fmt.Errorf("error:%v, %s", p.GetLastError(), ps.ProbeIdentificationPair.String())
-		}
-		return nil
-	}
-	if !p.Enabled {
-		return fmt.Errorf(
-			"%s: is disabled, add it to the activation list and check that it was not explicitly excluded by the manager options",
-			ps.ProbeIdentificationPair.String())
-	}
-	return nil
-}
-
-// EditProbeIdentificationPair - Changes all the selectors looking for the old ProbeIdentificationPair so that they
-// mow select the new one
-func (ps *ProbeSelector) EditProbeIdentificationPair(old ProbeIdentificationPair, new ProbeIdentificationPair) {
-	if ps.Matches(old) {
-		ps.ProbeIdentificationPair = new
-	}
+// FunctionExcluder - An interface for types that can be used for `AdditionalExcludedFunctionCollector`
+type FunctionExcluder interface {
+	// ShouldExcludeFunction - Returns true if the function should be excluded
+	ShouldExcludeFunction(name string, prog *ebpf.ProgramSpec) bool
+	// CleanCaches - Is called when the manager is done with the excluder (for memory reclaiming for example)
+	CleanCaches()
 }
 
 // Options - Options of a Manager. These options define how a manager should be initialized.
@@ -161,14 +33,28 @@ type Options struct {
 	// If the list is empty, all probes will be activated.
 	ActivatedProbes []ProbesSelector
 
-	// ExcludedSections - A list of sections that should not even be verified. This list overrides the ActivatedProbes
+	// KeepUnmappedProgramSpecs - Defines if the manager should keep unmapped ProgramSpec instances in the collection.
+	// Enable this feature if you're going to clone one of these ProgramSpec.
+	KeepUnmappedProgramSpecs bool
+	// DiscardProgramSpecs opts into upstream instruction cleanup. By default,
+	// retain specs so existing CloneProgram callers continue to work.
+	DiscardProgramSpecs bool
+
+	// ExcludedFunctions - A list of functions that should not even be verified. This list overrides the ActivatedProbes
 	// list: since the excluded sections aren't loaded in the kernel, all the probes using those sections will be
 	// deactivated.
-	// Deprecated: 废弃段信息
-	ExcludedSections []string
-
-	// ExcludedEbpfFuncs 用于存储排除的符号表函数列表。来自ebpf字节码中符号表函数。
+	ExcludedFunctions []string
+	// ExcludedEbpfFuncs is the fork spelling of ExcludedFunctions.
 	ExcludedEbpfFuncs []string
+	// ExcludedSections is retained for compatibility; prefer function names.
+	ExcludedSections []string
+	RLimit           *unix.Rlimit
+
+	// AdditionalExcludedFunctionCollector - A dynamic function excluder, allowing to exclude functions with a callback.
+	AdditionalExcludedFunctionCollector FunctionExcluder
+
+	// ExcludedMaps - A list of maps that should not be created.
+	ExcludedMaps []string
 
 	// ConstantsEditor - Post-compilation constant edition. See ConstantEditor for more.
 	ConstantEditors []ConstantEditor
@@ -183,13 +69,20 @@ type Options struct {
 	// MapEditors - External map editor. The provided eBPF maps will overwrite the maps of the Manager if their names
 	// match.
 	// This is particularly useful to share maps across Managers (and therefore across isolated eBPF programs), without
-	// having to use the MapRouter indirection. However this technique only works before the eBPF programs are loaded,
+	// having to use the MapRouter indirection. However, this technique only works before the eBPF programs are loaded,
 	// and therefore before the Manager is started. The keys of the map are the names of the maps to edit, as defined
 	// in their sections SEC("maps/[name]").
 	MapEditors map[string]*ebpf.Map
 
+	// MapEditorsIgnoreMissingMaps - If MapEditorsIgnoreMissingMaps is set to true, the map edition process will return an
+	// error if a map was missing in at least one program
+	MapEditorsIgnoreMissingMaps bool
+
 	// MapRouter - External map routing. See MapRoute for more.
 	MapRouter []MapRoute
+
+	// InnerOuterMapSpecs - Defines the mapping between inner and outer maps. See InnerOuterMapSpec for more.
+	InnerOuterMapSpecs []InnerOuterMapSpec
 
 	// TailCallRouter - External tail call routing. See TailCallRoute for more.
 	TailCallRouter []TailCallRoute
@@ -209,49 +102,56 @@ type Options struct {
 	// See Probe.MaxActive for more.
 	DefaultKProbeMaxActive int
 
+	// DefaultKprobeAttachMethod - Manager-level default value for the Kprobe attach method. Defaults to AttachKprobeWithPerfEventOpen if unset.
+	DefaultKprobeAttachMethod KprobeAttachMethod
+
+	// DefaultUprobeAttachMethod - Manager-level default value for the Uprobe attach method. Defaults to AttachWithPerfEventOpen if unset.
+	DefaultUprobeAttachMethod AttachMethod
+
 	// ProbeRetry - Defines the number of times that a probe will retry to attach / detach on error.
 	DefaultProbeRetry uint
 
 	// ProbeRetryDelay - Defines the delay to wait before a probe should retry to attach / detach on error.
 	DefaultProbeRetryDelay time.Duration
 
-	// RLimit - The maps & programs provided to the manager might exceed the maximum allowed memory lock.
-	// (RLIMIT_MEMLOCK) If a limit is provided here it will be applied when the manager is initialized.
-	RLimit *unix.Rlimit
+	// RemoveRlimit - The maps & programs provided to the manager might exceed the maximum allowed memory lock.
+	// `RLIMIT_MEMLOCK` If a limit is provided here it will be applied when the manager is initialized.
+	RemoveRlimit bool
 
-	// KeepKernelBTF - Defines if the kernel types defined in VerifierOptions.Programs.KernelTypes should be cleaned up
-	// once the manager is done using them. By default, the manager will clean them up to save up space. DISCLAIMER: if
-	// your program uses "manager.CloneProgram", you might want to enable "KeepKernelBTF". As a workaround, you can also
-	// try to strip as much as possible the content of "KernelTypes" to reduce the memory overhead.
+	// KeepKernelBTF - Defines if the kernel BTF used while loading programs should be cleaned up once the manager is done
+	// using them. This governs both VerifierOptions.Programs.KernelTypes and the shared VerifierOptions.Cache. By default,
+	// the manager will clean both up after Start() to save up space: otherwise a long-lived manager keeps the parsed
+	// kernel BTF (vmlinux) pinned for the whole process lifetime, even though it is only needed while loading programs.
+	// DISCLAIMER: if your program uses "manager.CloneProgram", you might want to enable "KeepKernelBTF", as cloning
+	// reloads a program and needs "KernelTypes" for its CO-RE relocations. As a workaround, you can also try to strip as
+	// much as possible the content of "KernelTypes" to reduce the memory overhead.
 	KeepKernelBTF bool
-}
 
-// netlinkCacheKey - (TC classifier programs only) Key used to recover the netlink cache of an interface
-type netlinkCacheKey struct {
-	Ifindex int32
-	Netns   uint64
-}
+	// SkipPerfMapReaderStartup - Perf maps whose name is set to true with this option will not have their reader goroutine started when calling the manager.Start() function.
+	// PerfMap.Start() can then be used to start reading events from the corresponding PerfMap.
+	SkipPerfMapReaderStartup map[string]bool
 
-// netlinkCacheValue - (TC classifier programs only) Netlink socket and qdisc object used to update the classifiers of
-// an interface
-type netlinkCacheValue struct {
-	rtNetlink     *tc.Tc
-	schedClsCount int
+	// SkipRingbufferReaderStartup - Ringbuffer maps whose name is set to true with this option will not have their reader goroutine started when calling the manager.Start() function.
+	// RingbufMap.Start() can then be used to start reading events from the corresponding RingbufMap.
+	SkipRingbufferReaderStartup map[string]bool
+
+	// BypassEnabled controls whether program bypass is enabled for this manager
+	BypassEnabled bool
 }
 
 // InstructionPatcherFunc - A function that patches the instructions of a program
-// more info  https://github.com/DataDog/ebpf-manager/blob/main/manager.go#L158
 type InstructionPatcherFunc func(m *Manager) error
 
 // Manager - Helper structure that manages multiple eBPF programs and maps
 type Manager struct {
-	wg             *sync.WaitGroup
-	collectionSpec *ebpf.CollectionSpec
-	collection     *ebpf.Collection
-	options        Options
-	netlinkCache   map[netlinkCacheKey]*netlinkCacheValue
-	state          state
-	stateLock      sync.RWMutex
+	collectionSpec     *ebpf.CollectionSpec
+	collection         *ebpf.Collection
+	options            Options
+	netlinkSocketCache *netlinkSocketCache
+	state              state
+	stateLock          sync.RWMutex
+	bypassIndexes      map[string]uint32
+	maxBypassIndex     uint32
 
 	// Probes - List of probes handled by the manager
 	Probes []*Probe
@@ -263,21 +163,35 @@ type Manager struct {
 	// PerfMaps - List of perf ring buffers handled by the manager
 	PerfMaps []*PerfMap
 
+	// RingBuffers - List of perf ring buffers handled by the manager
+	RingBuffers []*RingbufMap
 	RingbufMaps []*RingbufMap
+
+	// DumpHandler - Callback function called when manager.DumpMaps() is called
+	// and dump the current state (human-readable)
+	DumpHandler func(w io.Writer, manager *Manager, mapName string, currentMap *ebpf.Map)
 
 	// InstructionPatchers - Callback functions called before loading probes, to
 	// provide user the ability to perform last minute instruction patching.
 	InstructionPatchers []InstructionPatcherFunc
 }
 
-// DumpMaps - Return a string containing human readable info about eBPF maps
+// DumpMaps - Write in the w writer argument human-readable info about eBPF maps
 // Dumps the set of maps provided, otherwise dumping all maps with a DumpHandler set.
-func (m *Manager) DumpMaps(maps ...string) (string, error) {
+func (m *Manager) DumpMapsTo(w io.Writer, maps ...string) error {
 	m.stateLock.RLock()
 	defer m.stateLock.RUnlock()
+	switch m.state {
+	case reset, elfLoaded:
+		return ErrManagerNotInitialized
+	case initialized, stopping, paused, running:
+	}
+	if m.collection == nil {
+		return ErrManagerNotInitialized
+	}
 
-	if m.collection == nil || m.state < initialized {
-		return "", ErrManagerNotInitialized
+	if m.DumpHandler == nil {
+		return nil
 	}
 
 	var mapsToDump map[string]struct{}
@@ -296,30 +210,17 @@ func (m *Manager) DumpMaps(maps ...string) (string, error) {
 		return found
 	}
 
-	var output strings.Builder
 	// Look in the list of maps
-	for _, managerMap := range m.Maps {
-		if managerMap.DumpHandler != nil && needDump(managerMap.Name) {
-			output.WriteString(managerMap.DumpHandler(managerMap, m))
+	for mapName, currentMap := range m.collection.Maps {
+		if needDump(mapName) {
+			m.DumpHandler(w, m, mapName, currentMap)
 		}
 	}
-	// Look in the list of perf maps
-	for _, perfMap := range m.PerfMaps {
-		if perfMap.DumpHandler != nil && needDump(perfMap.Name) {
-			output.WriteString(perfMap.DumpHandler(perfMap, m))
-		}
-	}
-	return output.String(), nil
+	return nil
 }
 
-// GetMap - Return a pointer to the requested eBPF map
-// name: name of the map, as defined by its section SEC("maps/[name]")
-func (m *Manager) GetMap(name string) (*ebpf.Map, bool, error) {
-	m.stateLock.RLock()
-	defer m.stateLock.RUnlock()
-	if m.collection == nil || m.state < initialized {
-		return nil, false, ErrManagerNotInitialized
-	}
+// getMap - Thread unsafe version of GetMap
+func (m *Manager) getMap(name string) (*ebpf.Map, bool, error) {
 	eBPFMap, ok := m.collection.Maps[name]
 	if ok {
 		return eBPFMap, true, nil
@@ -330,22 +231,53 @@ func (m *Manager) GetMap(name string) (*ebpf.Map, bool, error) {
 			return managerMap.array, true, nil
 		}
 	}
-	// Look in the list of perf maps
-	for _, perfMap := range m.PerfMaps {
-		if perfMap.Name == name {
-			return perfMap.array, true, nil
-		}
+	if perfMap, found := m.getPerfMap(name); found {
+		return perfMap.array, true, nil
+	}
+	if ringBuffer, found := m.getRingBuffer(name); found {
+		return ringBuffer.array, true, nil
 	}
 	return nil, false, nil
 }
 
-// GetMapSpec - Return a pointer to the requested eBPF MapSpec. This is useful when duplicating a map.
-func (m *Manager) GetMapSpec(name string) (*ebpf.MapSpec, bool, error) {
+// GetMap - Return a pointer to the requested eBPF map
+// name: name of the map, as defined by its section SEC("maps/[name]")
+func (m *Manager) GetMap(name string) (*ebpf.Map, bool, error) {
 	m.stateLock.RLock()
 	defer m.stateLock.RUnlock()
-	if m.collectionSpec == nil || m.state < initialized {
+	switch m.state {
+	case reset, elfLoaded:
+		return nil, false, ErrManagerNotInitialized
+	case initialized, stopping, paused, running:
+	}
+	if m.collection == nil {
 		return nil, false, ErrManagerNotInitialized
 	}
+	return m.getMap(name)
+}
+
+// GetMaps - Return the list of eBPF maps in the manager
+func (m *Manager) GetMaps() (map[string]*ebpf.Map, error) {
+	m.stateLock.RLock()
+	defer m.stateLock.RUnlock()
+	switch m.state {
+	case reset, elfLoaded:
+		return nil, ErrManagerNotInitialized
+	case initialized, stopping, paused, running:
+	}
+	if m.collection == nil {
+		return nil, ErrManagerNotInitialized
+	}
+
+	output := make(map[string]*ebpf.Map, len(m.collection.Maps))
+	for section, m := range m.collection.Maps {
+		output[section] = m
+	}
+	return output, nil
+}
+
+// getMapSpec - Thread unsafe version of GetMapSpec
+func (m *Manager) getMapSpec(name string) (*ebpf.MapSpec, bool, error) {
 	eBPFMap, ok := m.collectionSpec.Maps[name]
 	if ok {
 		return eBPFMap, true, nil
@@ -356,36 +288,32 @@ func (m *Manager) GetMapSpec(name string) (*ebpf.MapSpec, bool, error) {
 			return managerMap.arraySpec, true, nil
 		}
 	}
-	// Look in the list of perf maps
-	for _, perfMap := range m.PerfMaps {
-		if perfMap.Name == name {
-			return perfMap.arraySpec, true, nil
-		}
+	if perfMap, found := m.getPerfMap(name); found {
+		return perfMap.arraySpec, true, nil
+	}
+	if ringBuffer, found := m.getRingBuffer(name); found {
+		return ringBuffer.arraySpec, true, nil
 	}
 	return nil, false, nil
 }
 
-// editMapSpec -
-func (m *Manager) editMapSpec(name string, mapSpec *ebpf.MapSpec) error {
+// GetMapSpec - Return a pointer to the requested eBPF MapSpec. This is useful when duplicating a map.
+func (m *Manager) GetMapSpec(name string) (*ebpf.MapSpec, bool, error) {
 	m.stateLock.RLock()
 	defer m.stateLock.RUnlock()
-	if m.collectionSpec == nil || m.state < initialized {
-		return ErrManagerNotInitialized
+	switch m.state {
+	case reset:
+		return nil, false, ErrManagerNotELFLoaded
+	case elfLoaded, initialized, stopping, paused, running:
 	}
-
-	// 判断是否存在该map
-	_, ok := m.collectionSpec.Maps[name]
-	if !ok {
-		return ErrUnknownMap
+	if m.collectionSpec == nil {
+		return nil, false, ErrManagerNotELFLoaded
 	}
-
-	// 覆盖mapSpec
-	m.collectionSpec.Maps[name] = mapSpec
-	return nil
+	return m.getMapSpec(name)
 }
 
-// GetPerfMap - Select a perf map by its name
-func (m *Manager) GetPerfMap(name string) (*PerfMap, bool) {
+// getPerfMap - Thread unsafe version of GetPerfMap
+func (m *Manager) getPerfMap(name string) (*PerfMap, bool) {
 	for _, perfMap := range m.PerfMaps {
 		if perfMap.Name == name {
 			return perfMap, true
@@ -394,18 +322,33 @@ func (m *Manager) GetPerfMap(name string) (*PerfMap, bool) {
 	return nil, false
 }
 
-// GetProgram - Return a pointer to the requested eBPF program
-// section: section of the program, as defined by its section SEC("[section]")
-// id: unique identifier given to a probe. If UID is empty, then all the programs matching the provided section are
-// returned.
-func (m *Manager) GetProgram(id ProbeIdentificationPair) ([]*ebpf.Program, bool, error) {
+// GetPerfMap - Select a perf map by its name
+func (m *Manager) GetPerfMap(name string) (*PerfMap, bool) {
 	m.stateLock.RLock()
 	defer m.stateLock.RUnlock()
+	return m.getPerfMap(name)
+}
 
-	var programs []*ebpf.Program
-	if m.collection == nil || m.state < initialized {
-		return nil, false, ErrManagerNotInitialized
+// getRingBuffer - Thread unsafe version of GetRingBuffer
+func (m *Manager) getRingBuffer(name string) (*RingbufMap, bool) {
+	for _, ringBuffer := range m.RingBuffers {
+		if ringBuffer.Name == name {
+			return ringBuffer, true
+		}
 	}
+	return nil, false
+}
+
+// GetRingBuffer - Select a ring buffer by its name
+func (m *Manager) GetRingBuffer(name string) (*RingbufMap, bool) {
+	m.stateLock.RLock()
+	defer m.stateLock.RUnlock()
+	return m.getRingBuffer(name)
+}
+
+// getProgram - Thread unsafe version of GetProgram
+func (m *Manager) getProgram(id ProbeIdentificationPair) ([]*ebpf.Program, bool, error) {
+	var programs []*ebpf.Program
 	if id.UID == "" {
 		for _, probe := range m.Probes {
 			if probe.EbpfFuncName == id.EbpfFuncName {
@@ -419,8 +362,97 @@ func (m *Manager) GetProgram(id ProbeIdentificationPair) ([]*ebpf.Program, bool,
 		return []*ebpf.Program{prog}, ok, nil
 	}
 	for _, probe := range m.Probes {
-		if probe.IdentificationPairMatches(id) {
+		if probe.GetIdentificationPair() == id {
 			return []*ebpf.Program{probe.program}, true, nil
+		}
+	}
+	return programs, false, nil
+}
+
+// GetProgram - Return a pointer to the requested eBPF program
+// section: section of the program, as defined by its section SEC("[section]")
+// id: unique identifier given to a probe. If UID is empty, then all the programs matching the provided section are
+// returned.
+func (m *Manager) GetProgram(id ProbeIdentificationPair) ([]*ebpf.Program, bool, error) {
+	m.stateLock.RLock()
+	defer m.stateLock.RUnlock()
+	switch m.state {
+	case reset, elfLoaded:
+		return nil, false, ErrManagerNotInitialized
+	case initialized, stopping, paused, running:
+	}
+	if m.collection == nil {
+		return nil, false, ErrManagerNotInitialized
+	}
+	return m.getProgram(id)
+}
+
+// GetPrograms - Return the list of eBPF programs in the manager
+func (m *Manager) GetPrograms() (map[string]*ebpf.Program, error) {
+	m.stateLock.RLock()
+	defer m.stateLock.RUnlock()
+	switch m.state {
+	case reset, elfLoaded:
+		return nil, ErrManagerNotInitialized
+	case initialized, stopping, paused, running:
+	}
+	if m.collection == nil {
+		return nil, ErrManagerNotInitialized
+	}
+
+	return maps.Clone(m.collection.Programs), nil
+}
+
+// GetMapSpecs - Return the list of eBPF map specs in the manager
+func (m *Manager) GetMapSpecs() (map[string]*ebpf.MapSpec, error) {
+	m.stateLock.RLock()
+	defer m.stateLock.RUnlock()
+	switch m.state {
+	case reset:
+		return nil, ErrManagerNotELFLoaded
+	case elfLoaded, initialized, stopping, paused, running:
+	}
+	if m.collectionSpec == nil {
+		return nil, ErrManagerNotELFLoaded
+	}
+
+	return maps.Clone(m.collectionSpec.Maps), nil
+}
+
+// GetProgramSpecs - Return the list of eBPF program specs in the manager
+func (m *Manager) GetProgramSpecs() (map[string]*ebpf.ProgramSpec, error) {
+	m.stateLock.RLock()
+	defer m.stateLock.RUnlock()
+	switch m.state {
+	case reset:
+		return nil, ErrManagerNotELFLoaded
+	case elfLoaded, initialized, stopping, paused, running:
+	}
+	if m.collectionSpec == nil {
+		return nil, ErrManagerNotELFLoaded
+	}
+
+	return maps.Clone(m.collectionSpec.Programs), nil
+}
+
+// getProgramSpec - Thread unsafe version of GetProgramSpec
+func (m *Manager) getProgramSpec(id ProbeIdentificationPair) ([]*ebpf.ProgramSpec, bool, error) {
+	var programs []*ebpf.ProgramSpec
+	if id.UID == "" {
+		for _, probe := range m.Probes {
+			if probe.EbpfFuncName == id.EbpfFuncName && probe.programSpec != nil {
+				programs = append(programs, probe.programSpec)
+			}
+		}
+		if len(programs) > 0 {
+			return programs, true, nil
+		}
+		prog, ok := m.collectionSpec.Programs[id.EbpfFuncName]
+		return []*ebpf.ProgramSpec{prog}, ok, nil
+	}
+	for _, probe := range m.Probes {
+		if probe.GetIdentificationPair() == id {
+			return []*ebpf.ProgramSpec{probe.programSpec}, true, nil
 		}
 	}
 	return programs, false, nil
@@ -433,139 +465,266 @@ func (m *Manager) GetProgram(id ProbeIdentificationPair) ([]*ebpf.Program, bool,
 func (m *Manager) GetProgramSpec(id ProbeIdentificationPair) ([]*ebpf.ProgramSpec, bool, error) {
 	m.stateLock.RLock()
 	defer m.stateLock.RUnlock()
-
-	var programs []*ebpf.ProgramSpec
-	if m.collectionSpec == nil || m.state < initialized {
-		return nil, false, ErrManagerNotInitialized
+	switch m.state {
+	case reset:
+		return nil, false, ErrManagerNotELFLoaded
+	case elfLoaded, initialized, stopping, paused, running:
 	}
-	if id.UID == "" {
-		for _, probe := range m.Probes {
-			//if probe.Section == id.Section {
-			//	programs = append(programs, probe.programSpec)
-			//}
-			if probe.EbpfFuncName == id.EbpfFuncName {
-				programs = append(programs, probe.programSpec)
-			}
-		}
-		if len(programs) > 0 {
-			return programs, true, nil
-		}
-		// prog, ok := m.collectionSpec.Programs[id.Section]
-		prog, ok := m.collectionSpec.Programs[id.EbpfFuncName]
-		return []*ebpf.ProgramSpec{prog}, ok, nil
+	if m.collectionSpec == nil {
+		return nil, false, ErrManagerNotELFLoaded
 	}
-	for _, probe := range m.Probes {
-		if probe.IdentificationPairMatches(id) {
-			return []*ebpf.ProgramSpec{probe.programSpec}, true, nil
-		}
-	}
-	return programs, false, nil
+	return m.getProgramSpec(id)
 }
 
-// GetProbe - Select a probe by its section and UID
-func (m *Manager) GetProbe(id ProbeIdentificationPair) (*Probe, bool) {
+// getProbe - Thread unsafe version of GetProbe
+func (m *Manager) getProbe(id ProbeIdentificationPair) (*Probe, bool) {
 	for _, managerProbe := range m.Probes {
-		if managerProbe.IdentificationPairMatches(id) {
+		if managerProbe.GetIdentificationPair() == id {
 			return managerProbe, true
 		}
 	}
 	return nil, false
 }
 
+// GetProbes returns a copy of the Probes list
+func (m *Manager) GetProbes() []*Probe {
+	m.stateLock.RLock()
+	defer m.stateLock.RUnlock()
+
+	return slices.Clone(m.Probes)
+}
+
+// GetProbe - Select a probe by its section and UID
+func (m *Manager) GetProbe(id ProbeIdentificationPair) (*Probe, bool) {
+	m.stateLock.RLock()
+	defer m.stateLock.RUnlock()
+	return m.getProbe(id)
+}
+
+// LoadELF loads the collection spec from the provided ELF reader
+func (m *Manager) LoadELF(elf io.ReaderAt) error {
+	m.stateLock.Lock()
+	defer m.stateLock.Unlock()
+	switch m.state {
+	case reset:
+		return m.loadELF(elf)
+	case elfLoaded, initialized, stopping, paused, running:
+		return ErrManagerELFLoaded
+	}
+	return nil
+}
+
+func (m *Manager) loadELF(elf io.ReaderAt) error {
+	// Load the provided elf buffer
+	var err error
+	m.collectionSpec, err = ebpf.LoadCollectionSpecFromReader(elf)
+	if err != nil {
+		return err
+	}
+	m.state = elfLoaded
+	return nil
+}
+
 // Init - Initialize the manager.
-// elf: reader containing the eBPF bytecode
+// elf: reader containing the eBPF bytecode, must be nil if LoadELF already called
 func (m *Manager) Init(elf io.ReaderAt) error {
 	return m.InitWithOptions(elf, Options{})
 }
 
 // InitWithOptions - Initialize the manager.
-// elf: reader containing the eBPF bytecode
+// elf: reader containing the eBPF bytecode, must be nil if LoadELF already called
 // options: options provided to the manager to configure its initialization
 func (m *Manager) InitWithOptions(elf io.ReaderAt, options Options) error {
-	m.stateLock.Lock()
-	if m.state > initialized {
-		m.stateLock.Unlock()
-		return ErrManagerRunning
+	if err := m.initState(elf, options); err != nil {
+		return err
 	}
 
-	m.wg = &sync.WaitGroup{}
+	if err := m.postInit(m.options); err != nil {
+		m.stateLock.Lock()
+		m.state = reset
+		m.stateLock.Unlock()
+		return err
+	}
+
+	return nil
+}
+
+func (m *Manager) initState(elf io.ReaderAt, options Options) error {
+	m.stateLock.Lock()
+	defer m.stateLock.Unlock()
+
+	switch m.state {
+	case stopping, paused, running:
+		return ErrManagerRunning
+	case reset, elfLoaded, initialized:
+	}
+
 	m.options = options
-	m.netlinkCache = make(map[netlinkCacheKey]*netlinkCacheValue)
+	m.options.MapEditors = maps.Clone(options.MapEditors)
+	if !options.DiscardProgramSpecs {
+		m.options.KeepUnmappedProgramSpecs = true
+		for _, probe := range m.Probes {
+			probe.KeepProgramSpec = true
+		}
+	}
+	m.options.ExcludedFunctions = append(slices.Clone(options.ExcludedFunctions), options.ExcludedEbpfFuncs...)
+	for _, rb := range m.RingbufMaps {
+		if !slices.Contains(m.RingBuffers, rb) {
+			m.RingBuffers = append(m.RingBuffers, rb)
+		}
+	}
+	m.netlinkSocketCache = newNetlinkSocketCache()
 	if m.options.DefaultPerfRingBufferSize == 0 {
 		m.options.DefaultPerfRingBufferSize = os.Getpagesize()
 	}
 
 	// perform a quick sanity check on the provided probes and maps
 	if err := m.sanityCheck(); err != nil {
-		m.stateLock.Unlock()
 		return err
 	}
 
-	// set resource limit if requested
 	if m.options.RLimit != nil {
-		err := unix.Setrlimit(unix.RLIMIT_MEMLOCK, m.options.RLimit)
-		if err != nil {
-			return errors.New(fmt.Sprintf("error:%v , couldn't adjust RLIMIT_MEMLOCK", err))
+		if err := unix.Setrlimit(unix.RLIMIT_MEMLOCK, m.options.RLimit); err != nil {
+			return fmt.Errorf("could not set memlock limit: %w", err)
+		}
+	}
+	// set resource limit if requested
+	if m.options.RemoveRlimit {
+		// rlimit.RemoveMemlock automatically detects if rlimit based accounting
+		// is used for eBPF maps. Only in this case is the rlimit removed.
+		// If cgroup based accounting is in effect, then rlimit is not removed.
+		if err := rlimit.RemoveMemlock(); err != nil {
+			return fmt.Errorf("couldn't adjust RLIMIT_MEMLOCK: %w", err)
 		}
 	}
 
-	// Load the provided elf buffer
-	var err error
-	m.collectionSpec, err = ebpf.LoadCollectionSpecFromReader(elf)
-	if err != nil {
-		m.stateLock.Unlock()
-		return err
-	}
-	// check probe field
-	for _, probe := range m.Probes {
-		err = probe.checkField()
-		if err != nil {
+	switch m.state {
+	case reset:
+		if elf == nil {
+			return fmt.Errorf("nil ELF reader")
+		}
+		if err := m.loadELF(elf); err != nil {
 			return err
 		}
+	case elfLoaded, initialized, stopping, paused, running:
+		if elf != nil {
+			return ErrManagerELFLoaded
+		}
 	}
-	// Remove excluded sections
-	for _, excludedMatchFun := range m.options.ExcludedEbpfFuncs {
-		delete(m.collectionSpec.Programs, excludedMatchFun)
+
+	if m.options.AdditionalExcludedFunctionCollector != nil {
+		for key, prog := range m.collectionSpec.Programs {
+			if m.options.AdditionalExcludedFunctionCollector.ShouldExcludeFunction(key, prog) {
+				m.options.ExcludedFunctions = append(m.options.ExcludedFunctions, key)
+			}
+		}
+		m.options.AdditionalExcludedFunctionCollector.CleanCaches()
 	}
-	// Match Maps and program specs
-	if err := m.matchSpecs(); err != nil {
-		m.stateLock.Unlock()
+
+	for name, prog := range m.collectionSpec.Programs {
+		if slices.Contains(m.options.ExcludedSections, prog.SectionName) {
+			m.options.ExcludedFunctions = append(m.options.ExcludedFunctions, name)
+		}
+	}
+	// Remove excluded programs
+	for _, excludedFuncName := range m.options.ExcludedFunctions {
+		delete(m.collectionSpec.Programs, excludedFuncName)
+	}
+	for i := 0; i < len(m.Probes); {
+		if slices.Contains(m.options.ExcludedFunctions, m.Probes[i].EbpfFuncName) {
+			m.Probes = slices.Delete(m.Probes, i, i+1)
+		} else {
+			i++
+		}
+	}
+	// Remove ConstantEditors that point to only excluded functions
+	for i := 0; i < len(m.options.ConstantEditors); {
+		ce := m.options.ConstantEditors[i]
+		isSpecific := len(ce.ProbeIdentificationPairs) > 0
+		// remove excluded ProbeIdentificationPairs
+		for j := 0; j < len(ce.ProbeIdentificationPairs); {
+			if slices.Contains(m.options.ExcludedFunctions, ce.ProbeIdentificationPairs[j].EbpfFuncName) {
+				ce.ProbeIdentificationPairs = slices.Delete(ce.ProbeIdentificationPairs, j, j+1)
+			} else {
+				j++
+			}
+		}
+		// was a specific constant editor, but all the probes are excluded
+		if isSpecific && len(ce.ProbeIdentificationPairs) == 0 {
+			m.options.ConstantEditors = slices.Delete(m.options.ConstantEditors, i, i+1)
+		} else {
+			i++
+		}
+	}
+
+	// must run before map exclusion in case bypass is disabled
+	bypassMap, err := m.setupBypass()
+	if err != nil {
 		return err
 	}
+
+	// Remove excluded maps
+	for _, excludeMapName := range m.options.ExcludedMaps {
+		delete(m.collectionSpec.Maps, excludeMapName)
+	}
+	for i := 0; i < len(m.Maps); {
+		if slices.Contains(m.options.ExcludedMaps, m.Maps[i].Name) {
+			m.Maps = slices.Delete(m.Maps, i, i+1)
+		} else {
+			i++
+		}
+	}
+
+	// Match Maps and program specs
+	if err = m.matchSpecs(); err != nil {
+		return err
+	}
+
 	// Configure activated probes
 	m.activateProbes()
-	m.state = initialized
-	m.stateLock.Unlock()
-	resetManager := func(m *Manager) {
-		m.stateLock.Lock()
-		m.state = reset
-		m.stateLock.Unlock()
+
+	// populate bypass indexes on Probe objects
+	// this must run after matchSpecs due to CopyProgram handling
+	if bypassMap != nil {
+		for _, mProbe := range m.Probes {
+			if idx, ok := m.bypassIndexes[mProbe.GetEbpfFuncName()]; ok {
+				mProbe.bypassIndex = idx
+				mProbe.bypassMap = bypassMap
+			}
+		}
 	}
-	// Edit program constants
+
+	m.state = initialized
+	return nil
+}
+
+func (m *Manager) postInit(options Options) error {
+	// newEditor program constants
 	if len(options.ConstantEditors) > 0 {
 		if err := m.editConstants(); err != nil {
 			return err
 		}
 	}
 
-	// Edit map spec
+	// newEditor map spec
 	if len(options.MapSpecEditors) > 0 {
 		if err := m.editMapSpecs(); err != nil {
 			return err
 		}
 	}
 
-	// Edit program maps
-	if len(options.MapEditors) > 0 {
-		if err := m.editMaps(options.MapEditors); err != nil {
-			return err
+	// Setup map routes
+	if len(options.InnerOuterMapSpecs) > 0 {
+		for _, ioMapSpec := range options.InnerOuterMapSpecs {
+			if err := m.editInnerOuterMapSpec(ioMapSpec); err != nil {
+				return err
+			}
 		}
 	}
 
 	// Patch instructions
 	for _, patcher := range m.InstructionPatchers {
 		if err := patcher(m); err != nil {
-			resetManager(m)
 			return err
 		}
 	}
@@ -577,31 +736,167 @@ func (m *Manager) InitWithOptions(elf io.ReaderAt, options Options) error {
 
 	// Load eBPF program with the provided verifier options
 	if err := m.loadCollection(); err != nil {
+		if m.collection != nil {
+			m.collection.Close()
+		}
 		return err
 	}
+
 	return nil
+}
+
+func (m *Manager) setupBypass() (*Map, error) {
+	_, hasBypassMapSpec := m.collectionSpec.Maps[bypassMapName]
+	if !hasBypassMapSpec {
+		return nil, nil
+	}
+	if !m.options.BypassEnabled {
+		m.options.ExcludedMaps = append(m.options.ExcludedMaps, bypassMapName)
+		return nil, nil
+	}
+	// start with 1, so we know if programs even have a valid index set
+	m.maxBypassIndex = 1
+
+	const stackOffset = -8
+	// place a limit on how far we will inject from the start of a program
+	// otherwise we aren't sure what register we need to save/restore, and it could inflate the number of instructions.
+	const maxInstructionOffsetFromProgramStart = 1
+	// setup bypass constants for all programs
+	m.bypassIndexes = make(map[string]uint32, len(m.collectionSpec.Programs))
+	for name, p := range m.collectionSpec.Programs {
+		for i := 0; i < len(p.Instructions); i++ {
+			ins := p.Instructions[i]
+			if ins.Reference() != bypassOptInReference {
+				continue
+			}
+			// return error here to ensure we only error on programs that do have a bypass reference
+			if i > maxInstructionOffsetFromProgramStart {
+				return nil, fmt.Errorf("unable to inject bypass instructions into program %s: bypass reference occurs too late in program", name)
+			}
+			if i > 0 && p.Instructions[i-1].Src != asm.R1 {
+				return nil, fmt.Errorf("unable to inject bypass instructions into program %s: register other than r1 used before injection point", name)
+			}
+
+			m.bypassIndexes[name] = m.maxBypassIndex
+			newInsns := append([]asm.Instruction{
+				asm.Mov.Reg(asm.R6, asm.R1),
+				// save bypass index to stack
+				asm.StoreImm(asm.RFP, stackOffset, int64(m.maxBypassIndex), asm.Word),
+				// store pointer to bypass index
+				asm.Mov.Reg(asm.R2, asm.RFP),
+				asm.Add.Imm(asm.R2, stackOffset),
+				// load map reference
+				asm.LoadMapPtr(asm.R1, 0).WithReference(bypassMapName),
+				// bpf_map_lookup_elem
+				asm.FnMapLookupElem.Call(),
+				// if ret == 0, jump to `return 0`
+				asm.JEq.Imm(asm.R0, 0, "bypass_return"),
+				// pointer indirection of result from map lookup
+				asm.LoadMem(asm.R1, asm.R0, 0, asm.Word),
+				// if bypass NOT enabled, jump over return
+				asm.JEq.Imm(asm.R1, 0, "bypass_continue"),
+				asm.Mov.Imm(asm.R0, 0).WithSymbol("bypass_return"),
+				asm.Return(),
+				// zero out used stack slot
+				asm.StoreImm(asm.RFP, stackOffset, 0, asm.Word).WithSymbol("bypass_continue"),
+				asm.Mov.Reg(asm.R1, asm.R6),
+			}, p.Instructions[i+1:]...)
+			// necessary to keep kernel happy about source information for start of program
+			newInsns[0] = newInsns[0].WithSource(ins.Source())
+			p.Instructions = append(p.Instructions[:i], newInsns...)
+			m.maxBypassIndex += 1
+			break
+		}
+	}
+	// no programs modified
+	if m.maxBypassIndex == 1 {
+		m.options.ExcludedMaps = append(m.options.ExcludedMaps, bypassMapName)
+		return nil, nil
+	}
+
+	hasPerCPU := false
+	if err := features.HaveMapType(ebpf.PerCPUArray); err == nil {
+		hasPerCPU = true
+	}
+
+	bypassMap := &Map{Name: bypassMapName}
+	m.Maps = append(m.Maps, bypassMap)
+
+	if m.options.MapSpecEditors == nil {
+		m.options.MapSpecEditors = make(map[string]MapSpecEditor)
+	}
+	m.options.MapSpecEditors[bypassMapName] = MapSpecEditor{
+		MaxEntries: m.maxBypassIndex + 1,
+		EditorFlag: EditMaxEntries,
+	}
+
+	if !hasPerCPU {
+		// use scalar value for bypass/enable
+		bypassValue = 1
+		enableValue = 0
+		return bypassMap, nil
+	}
+
+	// upgrade map type to per-cpu, if available
+	specEditor := m.options.MapSpecEditors[bypassMapName]
+	specEditor.Type = ebpf.PerCPUArray
+	specEditor.EditorFlag |= EditType
+	m.options.MapSpecEditors[bypassMapName] = specEditor
+
+	// allocate per-cpu slices used for bypass/enable
+	cpus, err := ebpf.PossibleCPU()
+	if err != nil {
+		return nil, err
+	}
+	if bypassValue == nil {
+		bypassValue = makeAndSet(cpus, uint32(1))
+	}
+	if enableValue == nil {
+		enableValue = makeAndSet(cpus, uint32(0))
+	}
+
+	return bypassMap, nil
+}
+
+// releaseKernelBTF drops the references to the kernel BTF that are only needed while loading programs, so a long-lived
+// manager does not pin the parsed kernel BTF (vmlinux) for the whole process lifetime. Both the KernelTypes spec passed
+// to the verifier and the shared BTF cache are cleared, symmetrically. This is a no-op when KeepKernelBTF is set (for
+// example when the caller relies on CloneProgram, which reloads programs and needs KernelTypes for CO-RE relocations).
+func (m *Manager) releaseKernelBTF() {
+	if m.options.KeepKernelBTF {
+		return
+	}
+	m.options.VerifierOptions.Programs.KernelTypes = nil
+	m.options.VerifierOptions.Cache = nil
 }
 
 // Start - Attach eBPF programs, start perf ring readers and apply maps and tail calls routing.
 func (m *Manager) Start() error {
 	m.stateLock.Lock()
-	if m.state < initialized {
+	switch m.state {
+	case reset, elfLoaded, stopping:
 		m.stateLock.Unlock()
 		return ErrManagerNotInitialized
-	}
-	if m.state >= running {
+	case running:
 		m.stateLock.Unlock()
 		return nil
+	case initialized, paused:
 	}
 
-	if !m.options.KeepKernelBTF {
-		// release kernel BTF. It should no longer be needed
-		m.options.VerifierOptions.Programs.KernelTypes = nil
+	// release kernel BTF: it is only needed while loading programs and should no longer be needed now
+	m.releaseKernelBTF()
+
+	// clean up tracefs
+	if err := m.cleanupTraceFS(); err != nil {
+		m.stateLock.Unlock()
+		return fmt.Errorf("failed to cleanup tracefs: %w", err)
 	}
-	// clean up tracefs TODO 作用是什么？
 
 	// Start perf ring readers
 	for _, perfRing := range m.PerfMaps {
+		if m.options.SkipPerfMapReaderStartup[perfRing.Name] {
+			continue
+		}
 		if err := perfRing.Start(); err != nil {
 			// Clean up
 			_ = m.stop(CleanInternal)
@@ -610,11 +905,14 @@ func (m *Manager) Start() error {
 		}
 	}
 
-	// Start ring buf readers
-	for _, ringBuf := range m.RingbufMaps {
-		if err := ringBuf.Start(); err != nil {
+	// Start ring buffer readers
+	for _, ringBuffer := range m.RingBuffers {
+		if m.options.SkipRingbufferReaderStartup[ringBuffer.Name] {
+			continue
+		}
+		if err := ringBuffer.Start(); err != nil {
 			// Clean up
-			m.Stop(CleanInternal)
+			_ = m.stop(CleanInternal)
 			m.stateLock.Unlock()
 			return err
 		}
@@ -634,13 +932,13 @@ func (m *Manager) Start() error {
 	var validationErrs error
 	for _, selector := range m.options.ActivatedProbes {
 		if err := selector.RunValidator(m); err != nil {
-			validationErrs = multierror.Append(validationErrs, err)
+			validationErrs = errors.Join(validationErrs, err)
 		}
 	}
 	if validationErrs != nil {
 		// Clean up
 		_ = m.Stop(CleanInternal)
-		return fmt.Errorf("error:%v, %s", validationErrs, "probes activation validation failed")
+		return fmt.Errorf("probes activation validation failed: %w", validationErrs)
 	}
 
 	// Handle Maps router
@@ -659,78 +957,202 @@ func (m *Manager) Start() error {
 	return nil
 }
 
+func (m *Manager) Pause() error {
+	m.stateLock.Lock()
+	defer m.stateLock.Unlock()
+	switch m.state {
+	case paused:
+		return nil
+	case reset, elfLoaded, initialized, stopping:
+		return ErrManagerNotStarted
+	case running:
+	}
+	if !m.options.BypassEnabled {
+		return nil
+	}
+
+	for _, probe := range m.Probes {
+		if err := probe.Pause(); err != nil {
+			return err
+		}
+	}
+	m.state = paused
+	return nil
+}
+
+func (m *Manager) Resume() error {
+	m.stateLock.Lock()
+	defer m.stateLock.Unlock()
+	switch m.state {
+	case running:
+		return nil
+	case reset, elfLoaded, initialized, stopping:
+		return ErrManagerNotStarted
+	case paused:
+	}
+	if !m.options.BypassEnabled {
+		return nil
+	}
+
+	for _, probe := range m.Probes {
+		if err := probe.Resume(); err != nil {
+			return err
+		}
+	}
+	m.state = running
+	return nil
+}
+
 // Stop - Detach all eBPF programs and stop perf ring readers. The cleanup parameter defines which maps should be closed.
 // See MapCleanupType for mode.
 func (m *Manager) Stop(cleanup MapCleanupType) error {
-	m.stateLock.RLock()
-	defer m.stateLock.RUnlock()
-	if m.state < initialized {
+	m.stateLock.Lock()
+	defer m.stateLock.Unlock()
+	switch m.state {
+	case reset, elfLoaded:
 		return ErrManagerNotInitialized
+	case initialized, stopping, paused, running:
+		// stopping is only visible while another stopReaders holds the unlock
+		// window. After StopReaders returns, previousState is restored, so a
+		// later Stop() sees initialized/paused/running. Accepting stopping here
+		// covers the concurrent Stop() that arrives during that window.
+		return m.stop(cleanup)
 	}
-	return m.stop(cleanup)
+	return nil
 }
 
-func (m *Manager) stop(cleanup MapCleanupType) error {
-	var err error
+// StopReaders - Stop the kernel events readers Perf or Ring buffer.
+func (m *Manager) StopReaders(cleanup MapCleanupType) error {
+	m.stateLock.Lock()
+	defer m.stateLock.Unlock()
+	return m.stopReaders(cleanup)
+}
+
+// stopReaders - Thread unsafe version of StopReaders. The caller must hold stateLock.
+func (m *Manager) stopReaders(cleanup MapCleanupType) error {
+	// Block Start/NewPerfRing/NewRingBuffer for the unlock window below, then
+	// restore so StopReaders is not a sticky state. Only restore if we are
+	// still stopping: a concurrent Stop() may already have gone to reset.
+	previousState := m.state
+	m.state = stopping
+	var errs []error
 
 	// Stop perf ring readers
 	for _, perfRing := range m.PerfMaps {
-		e := perfRing.Stop(cleanup)
-		if e != nil {
-			e = errors.New(fmt.Sprintf("error:%v , perf ring reader %s couldn't gracefully shut down", perfRing.Stop(cleanup), perfRing.Name))
+		if closeErr := perfRing.closeReader(); closeErr != nil {
+			errs = append(errs, fmt.Errorf("perf ring reader %s couldn't gracefully shut down: %w", perfRing.Name, closeErr))
 		}
-		err = ConcatErrors(err, e)
 	}
 
-	// Stop ring buf readers
-	for _, ringBuf := range m.RingbufMaps {
-		e := ringBuf.Stop(cleanup)
-		if e != nil {
-			e = errors.New(fmt.Sprintf("error:%v , ring buf reader %s couldn't gracefully shut down", ringBuf.Stop(cleanup), ringBuf.Name))
+	// Stop ring buffer readers
+	for _, ringBuffer := range m.RingBuffers {
+		if closeErr := ringBuffer.closeReader(); closeErr != nil {
+			errs = append(errs, fmt.Errorf("ring buffer reader %s couldn't gracefully shut down: %w", ringBuffer.Name, closeErr))
 		}
-		err = ConcatErrors(err, e)
+	}
+
+	// Temporarily release manager.stateLock to avoid a deadlock:
+	// reader goroutine handlers may call Manager methods that need
+	// stateLock.RLock(). By releasing the write lock, handlers can
+	// complete, allowing goroutines to loop back to ReadInto which
+	// will return ErrClosed.
+	m.stateLock.Unlock()
+
+	for _, perfRing := range m.PerfMaps {
+		perfRing.wgReader.Wait()
+	}
+	for _, ringBuffer := range m.RingBuffers {
+		ringBuffer.wgReader.Wait()
+	}
+
+	// Now get the lock again
+	m.stateLock.Lock()
+
+	// Clean up underlying maps
+	for _, perfRing := range m.PerfMaps {
+		if closeErr := perfRing.cleanupMap(cleanup); closeErr != nil {
+			errs = append(errs, fmt.Errorf("perf ring reader %s couldn't close map: %w", perfRing.Name, closeErr))
+		}
+	}
+	for _, ringBuffer := range m.RingBuffers {
+		if closeErr := ringBuffer.cleanupMap(cleanup); closeErr != nil {
+			errs = append(errs, fmt.Errorf("ring buffer reader %s couldn't close map: %w", ringBuffer.Name, closeErr))
+		}
+	}
+
+	if m.state == stopping {
+		m.state = previousState
+	}
+	return errors.Join(errs...)
+}
+
+func (m *Manager) stopProbes() error {
+	// Calling close() on perf_kprobe PMUs takes 30-50ms, which adds up for large projects.
+	// Close them concurrently to speed things up
+	var eg errgroup.Group
+	eg.SetLimit(12)
+	for _, probe := range m.Probes {
+		eg.Go(func() error {
+			if stopErr := probe.Stop(); stopErr != nil {
+				return fmt.Errorf("program %s couldn't gracefully shut down: %w", probe.GetIdentificationPair(), stopErr)
+			}
+			return nil
+		})
+	}
+	return eg.Wait()
+}
+
+// stop - Thread unsafe version of Stop. Requires the manager lock to not panic
+func (m *Manager) stop(cleanup MapCleanupType) error {
+	var errs []error
+	errs = append(errs, m.stopReaders(cleanup))
+
+	// check again state since stopReaders released the lock temporary
+	switch m.state {
+	case reset, elfLoaded:
+		return ErrManagerNotInitialized
+	case initialized, stopping, paused, running:
 	}
 
 	// Detach eBPF programs
-	for _, probe := range m.Probes {
-		e := probe.Stop()
-		if e != nil {
-			e = errors.New(fmt.Sprintf("error:%v , program %s couldn't gracefully shut down", e, probe.EbpfFuncName))
-		}
-		err = ConcatErrors(err, e)
-	}
+	errs = append(errs, m.stopProbes())
 
 	// Close maps
 	for _, managerMap := range m.Maps {
-		e := managerMap.Close(cleanup)
-		if e != nil {
-			e = errors.New(fmt.Sprintf("error:%v , couldn't gracefully close map %s", e, managerMap.Name))
+		if closeErr := managerMap.Close(cleanup); closeErr != nil {
+			errs = append(errs, fmt.Errorf("couldn't gracefully close map %s: %w", managerMap.Name, closeErr))
 		}
-		err = ConcatErrors(err, e)
 	}
 
 	// Close all netlink sockets
-	for _, entry := range m.netlinkCache {
-		err = ConcatErrors(err, entry.rtNetlink.Close())
-	}
+	m.netlinkSocketCache.cleanup()
 
 	// Clean up collection
-	// Note: we might end up closing the same programs and maps multiple times but the library gracefully handles those
-	// situations. We can't only rely on the collection to close all maps and programs because some pinned objects were
+	// Note: we might end up closing the same programs or maps multiple times but the library gracefully handles those
+	// situations. We can't rely only on the collection to close all maps and programs because some pinned objects were
 	// removed from the collection.
 	m.collection.Close()
-
-	// Wait for all go routines to stop
-	m.wg.Wait()
 	m.state = reset
-	return err
+	return errors.Join(errs...)
+
 }
 
 // NewMap - Create a new map using the provided parameters. The map is added to the list of maps managed by the manager.
 // Use a MapRoute to make this map available to the programs of the manager.
-func (m *Manager) NewMap(spec ebpf.MapSpec, options MapOptions) (*ebpf.Map, error) {
+func (m *Manager) NewMapFromSpec(spec *ebpf.MapSpec, options MapOptions) (*ebpf.Map, error) {
+	m.stateLock.Lock()
+	defer m.stateLock.Unlock()
+	switch m.state {
+	case reset, elfLoaded:
+		return nil, ErrManagerNotInitialized
+	case initialized, stopping, paused, running:
+	}
+	if m.collection == nil {
+		return nil, ErrManagerNotInitialized
+	}
+
 	// check if the name of the new map is available
-	_, exists, _ := m.GetMap(spec.Name)
+	_, exists, _ := m.getMap(spec.Name)
 	if exists {
 		return nil, ErrMapNameInUse
 	}
@@ -741,8 +1163,8 @@ func (m *Manager) NewMap(spec ebpf.MapSpec, options MapOptions) (*ebpf.Map, erro
 		return nil, err
 	}
 
-	// Init map
-	if err := managerMap.Init(m); err != nil {
+	// init map
+	if err := managerMap.init(); err != nil {
 		// Clean up
 		_ = managerMap.Close(CleanInternal)
 		return nil, err
@@ -762,84 +1184,45 @@ func (m *Manager) CloneMap(name string, newName string, options MapOptions) (*eb
 		return nil, err
 	}
 	if !exists {
-		return nil, errors.New(fmt.Sprintf("error:%v , failed to clone maps/%s", ErrUnknownMap, name))
+		return nil, fmt.Errorf("failed to clone maps/%s: %w", name, ErrUnknownSection)
 	}
 
 	// Duplicate spec and create a new map
 	spec := oldSpec.Copy()
 	spec.Name = newName
-	return m.NewMap(*spec, options)
-}
-
-// NewPerfRing - Creates a new perf ring and start listening for events.
-// Use a MapRoute to make this map available to the programs of the manager.
-func (m *Manager) NewPerfRing(spec ebpf.MapSpec, options MapOptions, perfMapOptions PerfMapOptions) (*ebpf.Map, error) {
-	// check if the name of the new map is available
-	_, exists, _ := m.GetMap(spec.Name)
-	if exists {
-		return nil, ErrMapNameInUse
-	}
-
-	// Create new map and perf ring buffer reader
-	perfMap, err := loadNewPerfMap(spec, options, perfMapOptions)
-	if err != nil {
-		return nil, err
-	}
-
-	// Setup perf buffer reader
-	if err := perfMap.Init(m); err != nil {
-		return nil, err
-	}
-
-	// Start perf buffer reader
-	if err := perfMap.Start(); err != nil {
-		// clean up
-		_ = perfMap.Stop(CleanInternal)
-		return nil, err
-	}
-
-	// Add map to the list of perf ring managed by the manager
-	m.PerfMaps = append(m.PerfMaps, perfMap)
-	return perfMap.array, nil
-}
-
-// ClonePerfRing - Clone an existing perf map and create a new one with the same spec.
-// Use a MapRoute to make this map available to the programs of the manager.
-func (m *Manager) ClonePerfRing(name string, newName string, options MapOptions, perfMapOptions PerfMapOptions) (*ebpf.Map, error) {
-	// Select map to clone
-	oldSpec, exists, err := m.GetMapSpec(name)
-	if err != nil {
-		return nil, err
-	}
-	if !exists {
-		return nil, errors.New(fmt.Sprintf("error:%v , failed to clone maps/%s: couldn't find map", ErrUnknownMap, name))
-	}
-
-	// Duplicate spec and create a new map
-	spec := oldSpec.Copy()
-	spec.Name = newName
-	return m.NewPerfRing(*spec, options, perfMapOptions)
+	return m.NewMapFromSpec(spec, options)
 }
 
 // AddHook - Hook an existing program to a hook point. This is particularly useful when you need to trigger an
 // existing program on a hook point that is determined at runtime. For example, you might want to hook an existing
 // eBPF TC classifier to the newly created interface of a container. Make sure to specify a unique uid in the new probe,
-// you will need it if you want to detach the program later. The original program is selected using the provided UID and
-// the section provided in the new probe.
+// you will need it if you want to detach the program later. The original program is selected using the provided UID,
+// the section and the eBPF function name provided in the new probe.
 func (m *Manager) AddHook(UID string, newProbe *Probe) error {
-	oldID := ProbeIdentificationPair{UID, newProbe.EbpfFuncName}
+	m.stateLock.Lock()
+	defer m.stateLock.Unlock()
+	switch m.state {
+	case reset, elfLoaded:
+		return ErrManagerNotInitialized
+	case initialized, stopping, paused, running:
+	}
+	if m.collection == nil {
+		return ErrManagerNotInitialized
+	}
+
+	oldID := ProbeIdentificationPair{UID: UID, EbpfFuncName: newProbe.EbpfFuncName}
 	// Look for the eBPF program
-	progs, found, err := m.GetProgram(oldID)
+	progs, found, err := m.getProgram(oldID)
 	if err != nil {
 		return err
 	}
 	if !found || len(progs) == 0 {
-		return errors.New(fmt.Sprintf("error:%v , couldn't find program %v", ErrUnknownMatchFuncName, oldID))
+		return fmt.Errorf("couldn't find program %s: %w", oldID, ErrUnknownSectionOrFuncName)
 	}
 	prog := progs[0]
-	progSpecs, found, _ := m.GetProgramSpec(oldID)
+	progSpecs, found, _ := m.getProgramSpec(oldID)
 	if !found || len(progSpecs) == 0 {
-		return errors.New(fmt.Sprintf("error:%v , couldn't find programSpec %v", ErrUnknownMatchFuncSpec, oldID))
+		return fmt.Errorf("couldn't find programSpec %s: %w", oldID, ErrUnknownSectionOrFuncName)
 	}
 	progSpec := progSpecs[0]
 
@@ -847,24 +1230,37 @@ func (m *Manager) AddHook(UID string, newProbe *Probe) error {
 	newProbe.Enabled = true
 
 	// Make sure the provided identification pair is unique
-	_, exists, _ := m.GetProgramSpec(newProbe.GetIdentificationPair())
+	_, exists, _ := m.getProgramSpec(newProbe.GetIdentificationPair())
 	if exists {
-		return errors.New(fmt.Sprintf("error:%v , couldn't add probe %v", ErrIdentificationPairInUse, newProbe.GetIdentificationPair()))
+		return fmt.Errorf("probe %s already exists: %w", newProbe.GetIdentificationPair(), ErrIdentificationPairInUse)
 	}
 
 	// Clone program
 	clonedProg, err := prog.Clone()
 	if err != nil {
-		return errors.New(fmt.Sprintf("error:%v , couldn't clone %v", err, oldID))
+		return fmt.Errorf("couldn't clone %v: %w", oldID, err)
 	}
 	newProbe.program = clonedProg
 	newProbe.programSpec = progSpec
 
-	// Init program
-	if err = newProbe.Init(m); err != nil {
+	var bypassMap *Map
+	for _, mp := range m.Maps {
+		if mp.Name == bypassMapName {
+			bypassMap = mp
+			break
+		}
+	}
+	bypassIndex, ok := m.bypassIndexes[newProbe.EbpfFuncName]
+	if ok && bypassMap != nil {
+		newProbe.bypassIndex = bypassIndex
+		newProbe.bypassMap = bypassMap
+	}
+
+	// init program
+	if err = newProbe.init(m); err != nil {
 		// clean up
 		_ = newProbe.Stop()
-		return errors.New(fmt.Sprintf("error:%v , failed to initialize new probe", err))
+		return fmt.Errorf("failed to initialize new probe: %w", err)
 	}
 
 	// Pin if needed
@@ -872,7 +1268,7 @@ func (m *Manager) AddHook(UID string, newProbe *Probe) error {
 		if err = newProbe.program.Pin(newProbe.PinPath); err != nil {
 			// clean up
 			_ = newProbe.Stop()
-			return errors.New(fmt.Sprintf("error:%v , couldn't pin new probe", err))
+			return fmt.Errorf("couldn't pin new probe: %w", err)
 		}
 	}
 
@@ -880,7 +1276,7 @@ func (m *Manager) AddHook(UID string, newProbe *Probe) error {
 	if err = newProbe.Attach(); err != nil {
 		// clean up
 		_ = newProbe.Stop()
-		return errors.New(fmt.Sprintf("error:%v , couldn't attach new probe", err))
+		return fmt.Errorf("couldn't attach new probe: %w", err)
 	}
 
 	// Add probe to the list of probes
@@ -891,12 +1287,22 @@ func (m *Manager) AddHook(UID string, newProbe *Probe) error {
 // DetachHook - Detach an eBPF program from a hook point. If there is only one instance left of this program in the
 // kernel, then the probe will be detached but the program will not be closed (so that it can be used later). In that
 // case, calling DetachHook has essentially the same effect as calling Detach() on the right Probe instance. However,
-// if there are more than one instance in the kernel of the requested program, then the probe selected by (section, UID)
-// is detached, and its own version of the program is closed.
-func (m *Manager) DetachHook(section string, UID string) error {
-	oldID := ProbeIdentificationPair{UID, section}
+// if there are more than one instance in the kernel of the requested program, then the probe selected by the provided
+// ProbeIdentificationPair is detached, and its own handle of the program is closed.
+func (m *Manager) DetachHookByID(id ProbeIdentificationPair) error {
+	m.stateLock.Lock()
+	defer m.stateLock.Unlock()
+	switch m.state {
+	case reset, elfLoaded:
+		return ErrManagerNotInitialized
+	case initialized, stopping, paused, running:
+	}
+	if m.collection == nil {
+		return ErrManagerNotInitialized
+	}
+
 	// Check how many instances of the program are left in the kernel
-	progs, _, err := m.GetProgram(ProbeIdentificationPair{"", section})
+	progs, _, err := m.getProgram(ProbeIdentificationPair{UID: "", EbpfFuncName: id.EbpfFuncName})
 	if err != nil {
 		return err
 	}
@@ -904,87 +1310,123 @@ func (m *Manager) DetachHook(section string, UID string) error {
 
 	// Look for the probe
 	idToDelete := -1
-	for id, managerProbe := range m.Probes {
-		if managerProbe.IdentificationPairMatches(oldID) {
+	for mID, mProbe := range m.Probes {
+		if mProbe.GetIdentificationPair() == id {
 			// Detach or stop the probe depending on shouldStop
 			if shouldStop {
-				if err = managerProbe.Stop(); err != nil {
-					return errors.New(fmt.Sprintf("error:%v , couldn't stop probe %v", err, oldID))
+				if err = mProbe.Stop(); err != nil {
+					return fmt.Errorf("couldn't stop probe %s: %w", id, err)
 				}
 			} else {
-				if err = managerProbe.Detach(); err != nil {
-					return errors.New(fmt.Sprintf("error:%v , couldn't detach probe %v", err, oldID))
+				if err = mProbe.Detach(); err != nil {
+					return fmt.Errorf("couldn't detach probe %s: %w", id, err)
 				}
 			}
-			idToDelete = id
+			idToDelete = mID
 		}
 	}
 	if idToDelete >= 0 {
-		m.Probes = append(m.Probes[:idToDelete], m.Probes[idToDelete+1:]...)
+		m.Probes = slices.Delete(m.Probes, idToDelete, idToDelete+1)
 	}
 	return nil
 }
 
 // CloneProgram - Create a clone of a program, load it in the kernel and attach it to its hook point. Since the eBPF
 // program instructions are copied before the program is loaded, you can edit them with a ConstantEditor, or remap
-// the eBPF maps as you like. This is particularly useful to workaround the absence of Array of Maps and Hash of Maps:
+// the eBPF maps as you like. This is particularly useful to work around the absence of Array of Maps and Hash of Maps:
 // first create the new maps you need, then clone the program you're interested in and rewrite it with the new maps,
 // using a MapEditor. The original program is selected using the provided UID and the section provided in the new probe.
-// Note that the BTF based constant edition will note work with this method.
+// Note that the BTF based constant edition will not work with this method.
 func (m *Manager) CloneProgram(UID string, newProbe *Probe, constantsEditors []ConstantEditor, mapEditors map[string]*ebpf.Map) error {
-	oldID := ProbeIdentificationPair{UID, newProbe.EbpfFuncName}
-	// Find the program specs
-	progSpecs, found, err := m.GetProgramSpec(oldID)
-	if err != nil {
-		return err
+	return m.CloneProgramWithSpecEditor(UID, newProbe, constantsEditors, mapEditors, nil)
+}
+
+// CloneProgramWithSpecEditor - does the same thing as CloneProgram, but allows to intercept the new program spec before the probe
+// is initialized. This is useful for example to clone an fentry probe, and edit the AttachTo field before the init of the new probe.
+func (m *Manager) CloneProgramWithSpecEditor(UID string, newProbe *Probe, constantsEditors []ConstantEditor, mapEditors map[string]*ebpf.Map, specEditor func(spec *ebpf.ProgramSpec)) error {
+	m.stateLock.Lock()
+	defer m.stateLock.Unlock()
+	switch m.state {
+	case reset, elfLoaded:
+		return ErrManagerNotInitialized
+	case initialized, stopping, paused, running:
 	}
-	if !found || len(progSpecs) == 0 {
-		return errors.New(fmt.Sprintf("error:%v , couldn't find programSpec %v", ErrUnknownMatchFuncSpec, oldID))
+	if m.collection == nil {
+		return ErrManagerNotInitialized
 	}
-	progSpec := progSpecs[0]
+
+	oldID := ProbeIdentificationPair{UID: UID, EbpfFuncName: newProbe.EbpfFuncName}
+	var oldProgramSpec *ebpf.ProgramSpec
+	// look for an existing probe
+	oldProbe, found := m.getProbe(oldID)
+	if found {
+		// check if the program spec of this probe was removed
+		if !oldProbe.KeepProgramSpec {
+			return fmt.Errorf("couldn't clone %s: this probe was cleaned up because KeepProgramSpec was disabled", oldID)
+		}
+		oldProgramSpec = oldProbe.programSpec
+	} else {
+		// the cloned program might not have a dedicated Probe, fallback to a collectionPec lookup
+		progSpecs, found, err := m.getProgramSpec(oldID)
+		if err != nil {
+			return err
+		}
+		if !found || len(progSpecs) == 0 {
+			return fmt.Errorf("couldn't find programSpec %v: %w", oldID, ErrUnknownSectionOrFuncName)
+		}
+		oldProgramSpec = progSpecs[0]
+
+		// the program spec was found
+		if !m.options.KeepUnmappedProgramSpecs {
+			return fmt.Errorf("couldn't clone %s: this probe was cleaned up because KeepUnmappedProgramSpecs was disabled", oldID)
+		}
+	}
 
 	// Check if the new probe has a unique identification pair
-	_, exists, _ := m.GetProgram(newProbe.GetIdentificationPair())
+	_, exists, _ := m.getProgram(newProbe.GetIdentificationPair())
 	if exists {
-		return errors.New(fmt.Sprintf("error:%v , couldn't add probe %v", ErrIdentificationPairInUse, newProbe.GetIdentificationPair()))
+		return fmt.Errorf("couldn't add probe %v: %w", newProbe.GetIdentificationPair(), ErrIdentificationPairInUse)
 	}
 
 	// Make sure the new probe is activated
 	newProbe.Enabled = true
 
 	// Clone the program
-	clonedSpec := progSpec.Copy()
+	clonedSpec := oldProgramSpec.Copy()
+	if specEditor != nil {
+		specEditor(clonedSpec)
+	}
 	newProbe.programSpec = clonedSpec
 
-	// Edit constants
+	// newEditor constants
 	for _, editor := range constantsEditors {
 		if err := m.editConstant(newProbe.programSpec, editor); err != nil {
-			return errors.New(fmt.Sprintf("error:%v , couldn't edit constant %s", err, editor.Name))
+			return fmt.Errorf("couldn't edit constant %s: %w", editor.Name, err)
 		}
 	}
 
 	// Write current maps
-	if err = m.rewriteMaps(newProbe.programSpec, m.collection.Maps); err != nil {
-		return errors.New(fmt.Sprintf("error:%v , couldn't rewrite maps in %v", err, newProbe.GetIdentificationPair()))
+	if err := m.rewriteMaps(newProbe.programSpec, m.collection.Maps, false); err != nil {
+		return fmt.Errorf("couldn't rewrite maps in %v: %w", newProbe.GetIdentificationPair(), err)
 	}
 
 	// Rewrite with new maps
-	if err = m.rewriteMaps(newProbe.programSpec, mapEditors); err != nil {
-		return errors.New(fmt.Sprintf("error:%v , couldn't rewrite maps in %v", err, newProbe.GetIdentificationPair()))
+	if err := m.rewriteMaps(newProbe.programSpec, mapEditors, true); err != nil {
+		return fmt.Errorf("couldn't rewrite maps in %v: %w", newProbe.GetIdentificationPair(), err)
 	}
 
-	// Init
-	if err = newProbe.InitWithOptions(m, true, true); err != nil {
+	// init
+	if err := newProbe.initWithOptions(m, true, true); err != nil {
 		// clean up
 		_ = newProbe.Stop()
-		return errors.New(fmt.Sprintf("error:%v , failed to initialize new probe %v", err, newProbe.GetIdentificationPair()))
+		return fmt.Errorf("failed to initialize new probe %v: %w", newProbe.GetIdentificationPair(), err)
 	}
 
 	// Attach new program
-	if err = newProbe.Attach(); err != nil {
+	if err := newProbe.Attach(); err != nil {
 		// clean up
 		_ = newProbe.Stop()
-		return errors.New(fmt.Sprintf("error:%v , failed to attach new probe %v", err, newProbe.GetIdentificationPair()))
+		return fmt.Errorf("failed to attach new probe %v: %w", newProbe.GetIdentificationPair(), err)
 	}
 
 	// Add probe to the list of probes
@@ -992,108 +1434,20 @@ func (m *Manager) CloneProgram(UID string, newProbe *Probe, constantsEditors []C
 	return nil
 }
 
-// UpdateMapRoutes - Update one or multiple map of maps structures so that the provided keys point to the provided maps.
-func (m *Manager) UpdateMapRoutes(router ...MapRoute) error {
-	for _, route := range router {
-		if err := m.updateMapRoute(route); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// updateMapRoute - Update a map of maps structure so that the provided key points to the provided map
-func (m *Manager) updateMapRoute(route MapRoute) error {
-	// Select the routing map
-	routingMap, found, err := m.GetMap(route.RoutingMapName)
-	if err != nil {
-		return err
-	}
-	if !found {
-		return errors.New(fmt.Sprintf("error:%v , couldn't find routing map %s", ErrUnknownMap, route.RoutingMapName))
-	}
-
-	// Get file descriptor of the routed map
-	var fd uint32
-	if route.Map != nil {
-		fd = uint32(route.Map.FD())
-	} else {
-		routedMap, found, err := m.GetMap(route.RoutedName)
-		if err != nil {
-			return err
-		}
-		if !found {
-			return errors.New(fmt.Sprintf("error:%v , couldn't find routed map %s", ErrUnknownMap, route.RoutedName))
-		}
-		fd = uint32(routedMap.FD())
-	}
-
-	// Insert map
-	if err = routingMap.Put(route.Key, fd); err != nil {
-		return errors.New(fmt.Sprintf("error:%v , couldn't update routing map %s", err, route.RoutingMapName))
-	}
-	return nil
-}
-
-// UpdateTailCallRoutes - Update one or multiple program arrays so that the provided keys point to the provided programs.
-func (m *Manager) UpdateTailCallRoutes(router ...TailCallRoute) error {
-	for _, route := range router {
-		if err := m.updateTailCallRoute(route); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// updateTailCallRoute - Update a program array so that the provided key point to the provided program.
-func (m *Manager) updateTailCallRoute(route TailCallRoute) error {
-	// Select the routing map
-	routingMap, found, err := m.GetMap(route.ProgArrayName)
-	if err != nil {
-		return err
-	}
-	if !found {
-		return errors.New(fmt.Sprintf("error:%v , couldn't find routing map %s", ErrUnknownMap, route.ProgArrayName))
-	}
-
-	// Get file descriptor of the routed program
-	var fd uint32
-	if route.Program != nil {
-		fd = uint32(route.Program.FD())
-	} else {
-		progs, found, err := m.GetProgram(route.ProbeIdentificationPair)
-		if err != nil {
-			return err
-		}
-		if !found || len(progs) == 0 {
-			return errors.New(fmt.Sprintf("error:%v , couldn't find program %v", ErrUnknownMatchFuncName, route.ProbeIdentificationPair))
-		}
-		fd = uint32(progs[0].FD())
-	}
-
-	// Insert tail call
-	if err = routingMap.Put(route.Key, fd); err != nil {
-		return errors.New(fmt.Sprintf("error:%v , couldn't update routing map %s", err, route.ProgArrayName))
-	}
-	return nil
-}
-
-func (m *Manager) getProbeProgramSpec(matchFuncName string) (*ebpf.ProgramSpec, error) {
-	spec, ok := m.collectionSpec.Programs[matchFuncName]
+func (m *Manager) getProbeProgramSpec(funcName string) (*ebpf.ProgramSpec, error) {
+	spec, ok := m.collectionSpec.Programs[funcName]
 	if !ok {
-		// Check if the probe section is in the list of excluded sections
-		var excluded bool
-		for _, excludedSection := range m.options.ExcludedEbpfFuncs {
-			if excludedSection == matchFuncName {
-				excluded = true
-				break
-			}
-		}
-		if !excluded {
-			return nil, errors.New(fmt.Sprintf("error:%v , couldn't find program at %s", ErrUnknownMatchFuncName, matchFuncName))
-		}
+		return nil, fmt.Errorf("couldn't find program spec for func %s: %w", funcName, ErrUnknownSectionOrFuncName)
 	}
 	return spec, nil
+}
+
+func (m *Manager) getProbeProgram(funcName string) (*ebpf.Program, error) {
+	p, ok := m.collection.Programs[funcName]
+	if !ok {
+		return nil, fmt.Errorf("couldn't find program %s: %w", funcName, ErrUnknownSectionOrFuncName)
+	}
+	return p, nil
 }
 
 // matchSpecs - Match loaded maps and program specs with the maps and programs provided to the manager
@@ -1108,7 +1462,7 @@ func (m *Manager) matchSpecs() error {
 			probe.programSpec = programSpec
 		} else {
 			probe.programSpec = programSpec.Copy()
-			m.collectionSpec.Programs[probe.EbpfFuncName+probe.UID] = probe.programSpec
+			m.collectionSpec.Programs[probe.GetEbpfFuncName()] = probe.programSpec
 		}
 	}
 
@@ -1116,10 +1470,9 @@ func (m *Manager) matchSpecs() error {
 	for _, managerMap := range m.Maps {
 		spec, ok := m.collectionSpec.Maps[managerMap.Name]
 		if !ok {
-			return errors.New(fmt.Sprintf("error:%v , couldn't find map at maps/%s", ErrUnknownMap, managerMap.Name))
+			return fmt.Errorf("couldn't find map at maps/%s: %w", managerMap.Name, ErrUnknownSection)
 		}
 		spec.Contents = managerMap.Contents
-		//spec.Freeze = managerMap.Freeze
 		managerMap.arraySpec = spec
 	}
 
@@ -1127,10 +1480,103 @@ func (m *Manager) matchSpecs() error {
 	for _, perfMap := range m.PerfMaps {
 		spec, ok := m.collectionSpec.Maps[perfMap.Name]
 		if !ok {
-			return errors.New(fmt.Sprintf("error:%v , couldn't find map at maps/%s", ErrUnknownMap, perfMap.Name))
+			return fmt.Errorf("couldn't find map at maps/%s: %w", perfMap.Name, ErrUnknownSection)
 		}
 		perfMap.arraySpec = spec
 	}
+
+	// Match ring buffer
+	for _, ringBuffer := range m.RingBuffers {
+		spec, ok := m.collectionSpec.Maps[ringBuffer.Name]
+		if !ok {
+			return fmt.Errorf("couldn't find map at maps/%s: %w", ringBuffer.Name, ErrUnknownSection)
+		}
+		ringBuffer.arraySpec = spec
+	}
+
+	return nil
+}
+
+// matchBPFObjects - Match loaded maps and program specs with the maps and programs provided to the manager
+func (m *Manager) matchBPFObjects() error {
+	// Match programs
+	var mappedProgramSpecNames []string
+	for _, probe := range m.Probes {
+		if probe.program == nil {
+			program, err := m.getProbeProgram(probe.GetEbpfFuncName())
+			if err != nil {
+				return err
+			}
+			probe.program = program
+			probe.checkPin = true
+		} else {
+			// A program reopened from bpffs was excluded from the load spec.
+			m.collection.Programs[probe.GetEbpfFuncName()] = probe.program
+		}
+		mappedProgramSpecNames = append(mappedProgramSpecNames, probe.EbpfFuncName)
+	}
+
+	// cleanup unmapped ProgramSpec now
+	if !m.options.KeepUnmappedProgramSpecs {
+	collectionSpec:
+		for specName, spec := range m.collectionSpec.Programs {
+			for _, name := range mappedProgramSpecNames {
+				if specName == name {
+					continue collectionSpec
+				}
+			}
+			cleanupProgramSpec(spec)
+		}
+	}
+
+	// Match maps
+	for _, managerMap := range m.Maps {
+		arr, ok := m.collection.Maps[managerMap.Name]
+		if !ok {
+			return fmt.Errorf("couldn't find map at maps/%s: %w", managerMap.Name, ErrUnknownSection)
+		}
+		// the `*ebpf.Map` reference may already be populated if pinned
+		if managerMap.array != nil {
+			// we don't need multiple references, so `Close` the new one
+			_ = arr.Close()
+			m.collection.Maps[managerMap.Name] = managerMap.array
+			continue
+		}
+		managerMap.array = arr
+	}
+
+	// Match perfmaps
+	for _, perfMap := range m.PerfMaps {
+		arr, ok := m.collection.Maps[perfMap.Name]
+		if !ok {
+			return fmt.Errorf("couldn't find map at maps/%s: %w", perfMap.Name, ErrUnknownSection)
+		}
+		// the `*ebpf.Map` reference may already be populated if pinned
+		if perfMap.array != nil {
+			// we don't need multiple references, so `Close` the new one
+			_ = arr.Close()
+			m.collection.Maps[perfMap.Name] = perfMap.array
+			continue
+		}
+		perfMap.array = arr
+	}
+
+	// Match ring buffers
+	for _, ringBuffer := range m.RingBuffers {
+		arr, ok := m.collection.Maps[ringBuffer.Name]
+		if !ok {
+			return fmt.Errorf("couldn't find map at maps/%s: %w", ringBuffer.Name, ErrUnknownSection)
+		}
+		// the `*ebpf.Map` reference may already be populated if pinned
+		if ringBuffer.array != nil {
+			// we don't need multiple references, so `Close` the new one
+			_ = arr.Close()
+			m.collection.Maps[ringBuffer.Name] = ringBuffer.array
+			continue
+		}
+		ringBuffer.array = arr
+	}
+
 	return nil
 }
 
@@ -1140,17 +1586,11 @@ func (m *Manager) activateProbes() {
 		shouldActivate := shouldPopulateActivatedProbes
 		for _, selector := range m.options.ActivatedProbes {
 			for _, p := range selector.GetProbesIdentificationPairList() {
-				if mProbe.IdentificationPairMatches(p) {
+				if mProbe.GetIdentificationPair() == p {
 					shouldActivate = true
 				}
 			}
 		}
-		for _, p := range m.options.ExcludedEbpfFuncs {
-			if mProbe.EbpfFuncName == p {
-				shouldActivate = false
-			}
-		}
-
 		mProbe.Enabled = shouldActivate
 
 		if shouldPopulateActivatedProbes {
@@ -1164,37 +1604,57 @@ func (m *Manager) activateProbes() {
 
 // UpdateActivatedProbes - update the list of activated probes
 func (m *Manager) UpdateActivatedProbes(selectors []ProbesSelector) error {
+	m.stateLock.Lock()
+	switch m.state {
+	case reset, elfLoaded:
+		m.stateLock.Unlock()
+		return ErrManagerNotInitialized
+	case initialized, stopping, paused, running:
+	}
+
 	currentProbes := make(map[ProbeIdentificationPair]*Probe)
 	for _, p := range m.Probes {
+		pip := ProbeIdentificationPair{UID: p.UID, EbpfFuncName: p.EbpfFuncName}
 		if p.Enabled {
-			currentProbes[p.GetIdentificationPair()] = p
+			currentProbes[pip] = p
 		}
 	}
 
 	nextProbes := make(map[ProbeIdentificationPair]bool)
 	for _, selector := range selectors {
 		for _, id := range selector.GetProbesIdentificationPairList() {
-			nextProbes[id] = true
+			if !slices.Contains(m.options.ExcludedFunctions, id.EbpfFuncName) {
+				pip := ProbeIdentificationPair{UID: id.UID, EbpfFuncName: id.EbpfFuncName}
+				nextProbes[pip] = true
+			}
 		}
 	}
 
 	for id := range nextProbes {
-		if _, alreadyPresent := currentProbes[id]; alreadyPresent {
+		var probe *Probe
+		if currentProbe, alreadyPresent := currentProbes[id]; alreadyPresent {
 			delete(currentProbes, id)
+			probe = currentProbe
 		} else {
-			probe, _ := m.GetProbe(id)
+			var found bool
+			probe, found = m.getProbe(id)
+			if !found {
+				m.stateLock.Unlock()
+				return fmt.Errorf("couldn't find program %s: %w", id, ErrUnknownSectionOrFuncName)
+			}
 			probe.Enabled = true
-			if err := probe.Init(m); err != nil {
-				return err
-			}
-			if err := probe.Attach(); err != nil {
-				return err
-			}
+		}
+		if !probe.IsRunning() {
+			// ignore all errors, they are already collected per probe and will be surfaced by the
+			// activation validators if needed.
+			_ = probe.init(m)
+			_ = probe.Attach()
 		}
 	}
 
 	for _, probe := range currentProbes {
 		if err := probe.Detach(); err != nil {
+			m.stateLock.Unlock()
 			return err
 		}
 		probe.Enabled = false
@@ -1202,184 +1662,32 @@ func (m *Manager) UpdateActivatedProbes(selectors []ProbesSelector) error {
 
 	// update activated probes & check activation
 	m.options.ActivatedProbes = selectors
+
+	m.stateLock.Unlock()
+
 	var validationErrs error
-	for _, selector := range m.options.ActivatedProbes {
+	for _, selector := range selectors {
 		if err := selector.RunValidator(m); err != nil {
-			validationErrs = multierror.Append(validationErrs, err)
+			validationErrs = errors.Join(validationErrs, err)
 		}
 	}
 
 	if validationErrs != nil {
 		// Clean up
 		_ = m.Stop(CleanInternal)
-		return fmt.Errorf("error:%v, %s", validationErrs, "probes activation validation failed")
+		return fmt.Errorf("probes activation validation failed: %w", validationErrs)
 	}
 
 	return nil
 }
 
-// editConstants - Edit the programs in the CollectionSpec with the provided constant editors. Tries with the BTF global
-// variable first, and fall back to the asm method if BTF is not available.
-func (m *Manager) editConstants() error {
-	// Start with the BTF based solution
-	rodata := m.collectionSpec.Maps[".rodata"]
-	if rodata != nil && rodata.Key != nil && rodata.Value != nil {
-		// The previous API provided CollectionSpec.RewriteConstants. That was removed
-		// in newer ebpf versions. Emulate the behavior by setting the corresponding
-		// VariableSpecs in the CollectionSpec. Honor FailOnMissing per editor.
-		for _, editor := range m.options.ConstantEditors {
-			if m.collectionSpec.Variables == nil {
-				if editor.FailOnMissing {
-					return fmt.Errorf("constant %s not found", editor.Name)
-				}
-				continue
-			}
-			vspec, ok := m.collectionSpec.Variables[editor.Name]
-			if !ok {
-				if editor.FailOnMissing {
-					return fmt.Errorf("constant %s not found", editor.Name)
-				}
-				continue
-			}
-			if err := vspec.Set(editor.Value); err != nil {
-				return fmt.Errorf("error:%v , couldn't set constant %s", err, editor.Name)
-			}
-		}
-		return nil
-	}
-
-	// Fall back to the old school constant edition
-	for _, constantEditor := range m.options.ConstantEditors {
-
-		// Edit the constant of the provided programs
-		for _, id := range constantEditor.ProbeIdentificationPairs {
-			programs, found, err := m.GetProgramSpec(id)
-			if err != nil {
-				return err
-			}
-			if !found || len(programs) == 0 {
-				return errors.New(fmt.Sprintf("error:%v , couldn't find programSpec %v", ErrUnknownMatchFuncName, id))
-			}
-			prog := programs[0]
-
-			// Edit program
-			if err := m.editConstant(prog, constantEditor); err != nil {
-				return errors.New(fmt.Sprintf("error:%v , couldn't edit %s in %v", err, constantEditor.Name, id))
-			}
-		}
-
-		// Apply to all programs if no section was provided
-		if len(constantEditor.ProbeIdentificationPairs) == 0 {
-			for section, prog := range m.collectionSpec.Programs {
-				if err := m.editConstant(prog, constantEditor); err != nil {
-					return errors.New(fmt.Sprintf("error:%v , couldn't edit %s in %s", err, constantEditor.Name, section))
-				}
-			}
-		}
-	}
-	return nil
-}
-
-// editMapSpecs - Update the MapSpec with the provided MapSpec editors.
-func (m *Manager) editMapSpecs() error {
-	for name, mapEditor := range m.options.MapSpecEditors {
-		// select the map spec
-		spec, exists, err := m.GetMapSpec(name)
-		if err != nil {
-			return err
-		}
-		if !exists {
-			return errors.New(fmt.Sprintf("error:%v , failed to edit maps/%s: couldn't find map", ErrUnknownMap, name))
-		}
-		if mapEditor.EditorFlag == 0 {
-			return fmt.Errorf("failed to edit maps/%s: %w", name, ErrMissingEditorFlags)
-		}
-		if EditType&mapEditor.EditorFlag == EditType {
-			spec.Type = mapEditor.Type
-		}
-		if EditMaxEntries&mapEditor.EditorFlag == EditMaxEntries {
-			spec.MaxEntries = mapEditor.MaxEntries
-		}
-		if EditFlags&mapEditor.EditorFlag == EditFlags {
-			spec.Flags = mapEditor.Flags
-		}
-
-		if EditInnerMap&mapEditor.EditorFlag == EditInnerMap {
-			// InnerMap  替换
-			if mapEditor.InnerMap != nil {
-				spec.InnerMap = mapEditor.InnerMap
-			}
-		}
-	}
-	return nil
-}
-
-// editConstant - Edit the provided program with the provided constant using the asm method.
-func (m *Manager) editConstant(prog *ebpf.ProgramSpec, editor ConstantEditor) error {
-	edit := Edit(&prog.Instructions)
-	data, ok := (editor.Value).(uint64)
-	if !ok {
-		return fmt.Errorf("with the asm method, the constant value has to be of type uint64")
-	}
-	if err := edit.RewriteConstant(editor.Name, data); err != nil {
-		if IsUnreferencedSymbol(err) && editor.FailOnMissing {
-			return err
-		}
-	}
-	return nil
-}
-
-// rewriteMaps - Rewrite the provided program spec with the provided maps
-func (m *Manager) rewriteMaps(program *ebpf.ProgramSpec, eBPFMaps map[string]*ebpf.Map) error {
+// rewriteMaps - Rewrite the provided program spec with the provided maps. failOnError controls if an error should be
+// returned when a map couldn't be rewritten.
+func (m *Manager) rewriteMaps(program *ebpf.ProgramSpec, eBPFMaps map[string]*ebpf.Map, failOnError bool) error {
 	for symbol, eBPFMap := range eBPFMaps {
-		// fd := eBPFMap.FD()
 		err := program.Instructions.AssociateMap(symbol, eBPFMap)
-		if err != nil {
-			return errors.New(fmt.Sprintf("error:%v , couldn't rewrite map %s", err, symbol))
-		}
-	}
-	return nil
-}
-
-// editMaps - Replace map specs so provided maps are used when loading the Collection.
-func (m *Manager) editMaps(maps map[string]*ebpf.Map) error {
-	// Use CollectionOptions.MapReplacements to instruct the loader to use these
-	// existing maps instead of creating new ones when loading the Collection.
-	if m.options.VerifierOptions.MapReplacements == nil {
-		m.options.VerifierOptions.MapReplacements = make(map[string]*ebpf.Map)
-	}
-	for name, mp := range maps {
-		m.options.VerifierOptions.MapReplacements[name] = mp
-	}
-
-	// Mark manager maps / perf maps as external/edited and keep references
-	for name, rwMap := range maps {
-		found := false
-		for _, managerMap := range m.Maps {
-			if managerMap.Name == name {
-				managerMap.array = rwMap
-				managerMap.externalMap = true
-				managerMap.editedMap = true
-				found = true
-			}
-		}
-		for _, perfRing := range m.PerfMaps {
-			if perfRing.Name == name {
-				perfRing.array = rwMap
-				perfRing.externalMap = true
-				perfRing.editedMap = true
-				found = true
-			}
-		}
-		if !found {
-			// Create a new entry
-			m.Maps = append(m.Maps, &Map{
-				array:       rwMap,
-				manager:     m,
-				externalMap: true,
-				editedMap:   true,
-				Name:        name,
-			})
+		if err != nil && failOnError {
+			return fmt.Errorf("couldn't rewrite map %s: %w", symbol, err)
 		}
 	}
 	return nil
@@ -1388,33 +1696,53 @@ func (m *Manager) editMaps(maps map[string]*ebpf.Map) error {
 // loadCollection - Load the eBPF maps and programs in the CollectionSpec. Programs and Maps are pinned when requested.
 func (m *Manager) loadCollection() error {
 	var err error
-	// Load collection
-	m.collection, err = ebpf.NewCollectionWithOptions(m.collectionSpec, m.options.VerifierOptions)
-	var ve *ebpf.VerifierError
-	if err != nil {
-		if errors.As(err, &ve) {
-			return fmt.Errorf("verifier error:%+v , couldn't load eBPF programs, cs:%v", ve, m.collectionSpec)
+
+	opts := m.options.VerifierOptions
+	// map references replaced this way will get a cloned reference to the *ebpf.Map upon collection load
+	opts.MapReplacements = maps.Clone(opts.MapReplacements)
+	if opts.MapReplacements == nil {
+		opts.MapReplacements = make(map[string]*ebpf.Map)
+	}
+	maps.Copy(opts.MapReplacements, m.options.MapEditors)
+	for name := range opts.MapReplacements {
+		if _, ok := m.collectionSpec.Maps[name]; !ok && m.options.MapEditorsIgnoreMissingMaps {
+			// prevent error for missing map by removing the editor
+			delete(opts.MapReplacements, name)
 		}
-		return fmt.Errorf("error:%v , couldn't load eBPF programs, cs:%v", err, m.collectionSpec)
+	}
+
+	m.collection, err = ebpf.NewCollectionWithOptions(m.collectionSpec, opts)
+	if err != nil {
+		var ve *ebpf.VerifierError
+		if errors.As(err, &ve) {
+			// include error twice to preserve context, and still allow unwrapping if desired
+			return fmt.Errorf("verifier error loading eBPF programs: %w\n%+v", err, ve)
+		}
+		return fmt.Errorf("couldn't load eBPF programs: %w", err)
+	}
+
+	// match loaded bpf objects
+	if err = m.matchBPFObjects(); err != nil {
+		return fmt.Errorf("couldn't match bpf objects: %w", err)
 	}
 
 	// Initialize Maps
 	for _, managerMap := range m.Maps {
-		if err := managerMap.Init(m); err != nil {
+		if err := managerMap.init(); err != nil {
 			return err
 		}
 	}
 
 	// Initialize PerfMaps
 	for _, perfMap := range m.PerfMaps {
-		if err := perfMap.Init(m); err != nil {
+		if err := perfMap.init(m); err != nil {
 			return err
 		}
 	}
 
-	// Initialize ringbufmap
-	for _, ringbufMap := range m.RingbufMaps {
-		if err := ringbufMap.Init(m); err != nil {
+	// Initialize ring buffers
+	for _, ringBuffer := range m.RingBuffers {
+		if err := ringBuffer.init(m); err != nil {
 			return err
 		}
 	}
@@ -1422,7 +1750,7 @@ func (m *Manager) loadCollection() error {
 	// Initialize Probes
 	for _, probe := range m.Probes {
 		// Find program
-		if err := probe.Init(m); err != nil {
+		if err := probe.init(m); err != nil {
 			return err
 		}
 	}
@@ -1439,7 +1767,7 @@ func (m *Manager) loadPinnedObjects() error {
 			continue
 		}
 		if err := m.loadPinnedMap(managerMap); err != nil {
-			if err == ErrPinnedObjectNotFound {
+			if errors.Is(err, ErrPinnedObjectNotFound) {
 				continue
 			}
 			return err
@@ -1452,7 +1780,20 @@ func (m *Manager) loadPinnedObjects() error {
 			continue
 		}
 		if err := m.loadPinnedMap(&perfMap.Map); err != nil {
-			if err == ErrPinnedObjectNotFound {
+			if errors.Is(err, ErrPinnedObjectNotFound) {
+				continue
+			}
+			return err
+		}
+	}
+
+	// Look for pinned perf buffer
+	for _, ringBuffer := range m.RingBuffers {
+		if ringBuffer.PinPath == "" {
+			continue
+		}
+		if err := m.loadPinnedMap(&ringBuffer.Map); err != nil {
+			if errors.Is(err, ErrPinnedObjectNotFound) {
 				continue
 			}
 			return err
@@ -1465,20 +1806,7 @@ func (m *Manager) loadPinnedObjects() error {
 			continue
 		}
 		if err := m.loadPinnedProgram(prog); err != nil {
-			if err == ErrPinnedObjectNotFound {
-				continue
-			}
-			return err
-		}
-	}
-
-	// Look for pinned programs
-	for _, prog := range m.Probes {
-		if prog.LinkPinPath == "" {
-			continue
-		}
-		if err := m.loadPinnedLink(prog); err != nil {
-			if err == ErrPinnedObjectNotFound {
+			if errors.Is(err, ErrPinnedObjectNotFound) {
 				continue
 			}
 			return err
@@ -1494,28 +1822,16 @@ func (m *Manager) loadPinnedMap(managerMap *Map) error {
 		return ErrPinnedObjectNotFound
 	}
 
-	// To maximize kernel compatibility, build the expected MapABI structure
-	/*
-		abi := ebpf.MapABI{
-			Type:       managerMap.arraySpec.Type,
-			KeySize:    managerMap.arraySpec.KeySize,
-			ValueSize:  managerMap.arraySpec.ValueSize,
-			MaxEntries: managerMap.arraySpec.MaxEntries,
-			Flags:      managerMap.arraySpec.Flags,
-		}
-		pinnedMap, err := ebpf.LoadPinnedMapExplicit(managerMap.PinPath, &abi)
-	*/
 	pinnedMap, err := ebpf.LoadPinnedMap(managerMap.PinPath, nil)
 	if err != nil {
-		return errors.New(fmt.Sprintf("error:%v , couldn't load map %s from %s", err, managerMap.Name, managerMap.PinPath))
+		return fmt.Errorf("couldn't load map %s from %s: %w", managerMap.Name, managerMap.PinPath, err)
 	}
 
-	// Replace map in CollectionSpec
-	if err := m.editMaps(map[string]*ebpf.Map{managerMap.Name: pinnedMap}); err != nil {
-		return err
+	if m.options.MapEditors == nil {
+		m.options.MapEditors = make(map[string]*ebpf.Map)
 	}
+	m.options.MapEditors[managerMap.Name] = pinnedMap
 	managerMap.array = pinnedMap
-	managerMap.externalMap = true
 	return nil
 }
 
@@ -1526,39 +1842,14 @@ func (m *Manager) loadPinnedProgram(prog *Probe) error {
 		return ErrPinnedObjectNotFound
 	}
 
-	// To maximize kernel compatibility, build the expected ProgramABI structure
-	/*
-		abi := ebpf.ProgramABI{
-			Type: prog.programSpec.Type,
-		}
-		pinnedProg, err := ebpf.LoadPinnedProgramExplicit(prog.PinPath, &abi)
-	*/
 	pinnedProg, err := ebpf.LoadPinnedProgram(prog.PinPath, nil)
 	if err != nil {
-		return errors.New(fmt.Sprintf("error:%v , couldn't load program %v from %s", err, prog.GetIdentificationPair(), prog.PinPath))
+		return fmt.Errorf("couldn't load program %v from %s: %w", prog.GetIdentificationPair(), prog.PinPath, err)
 	}
-
 	prog.program = pinnedProg
 
 	// Detach program from CollectionSpec
-	delete(m.collectionSpec.Programs, prog.EbpfFuncName)
-	return nil
-}
-
-// loadPinnedProgram - Loads a pinned program
-func (m *Manager) loadPinnedLink(prog *Probe) error {
-	// Check if the pinned object exists
-	if _, err := os.Stat(prog.LinkPinPath); err != nil {
-		return ErrPinnedObjectNotFound
-	}
-
-	pinnedLink, err := link.LoadPinnedLink(prog.LinkPinPath, nil)
-	if err != nil {
-		return errors.New(fmt.Sprintf("error:%v , couldn't load link %v from %s", err, prog.GetIdentificationPair(), prog.LinkPinPath))
-	}
-
-	prog.link = pinnedLink
-
+	delete(m.collectionSpec.Programs, prog.GetEbpfFuncName())
 	return nil
 }
 
@@ -1569,45 +1860,36 @@ func (m *Manager) sanityCheck() error {
 	for _, managerMap := range m.Maps {
 		_, ok := cache[managerMap.Name]
 		if ok {
-			return errors.New(fmt.Sprintf("error:%v , map %s failed the sanity check", ErrMapNameInUse, managerMap.Name))
+			return fmt.Errorf("map %s failed the sanity check: %w", managerMap.Name, ErrMapNameInUse)
 		}
 		cache[managerMap.Name] = true
 	}
+
 	for _, perfMap := range m.PerfMaps {
 		_, ok := cache[perfMap.Name]
 		if ok {
-			return errors.New(fmt.Sprintf("error:%v , map %s failed the sanity check", ErrMapNameInUse, perfMap.Name))
+			return fmt.Errorf("map %s failed the sanity check: %w", perfMap.Name, ErrMapNameInUse)
 		}
 		cache[perfMap.Name] = true
+	}
+
+	for _, ringBuffer := range m.RingBuffers {
+		_, ok := cache[ringBuffer.Name]
+		if ok {
+			return fmt.Errorf("map %s failed the sanity check: %w", ringBuffer.Name, ErrMapNameInUse)
+		}
+		cache[ringBuffer.Name] = true
 	}
 
 	// Check if probes identification pairs are unique, request the usage of CloneProbe otherwise
 	cache = map[string]bool{}
 	for _, managerProbe := range m.Probes {
-		_, ok := cache[managerProbe.GetIdentificationPair().String()]
+		key := managerProbe.GetIdentificationPair().String() //nolint:staticcheck
+		_, ok := cache[key]
 		if ok {
-			return errors.New(fmt.Sprintf("error:%v , %v failed the sanity check", ErrCloneProbeRequired, managerProbe.GetIdentificationPair()))
+			return fmt.Errorf("%s failed the sanity check: %w", key, ErrCloneProbeRequired)
 		}
-		cache[managerProbe.GetIdentificationPair().String()] = true
+		cache[key] = true
 	}
 	return nil
-}
-
-// newNetlinkConnection - (TC classifier) TC classifiers are attached by creating a qdisc on the requested
-// interface. A netlink socket is required to create a qdisc. Since this socket can be re-used for multiple classifiers,
-// instantiate the connection at the manager level and cache the netlink socket.
-func (m *Manager) newNetlinkConnection(ifindex int32, netns uint64) (*netlinkCacheValue, error) {
-	var cacheEntry netlinkCacheValue
-	var err error
-	// Open a netlink socket for the requested namespace
-	cacheEntry.rtNetlink, err = tc.Open(&tc.Config{
-		NetNS: int(netns),
-	})
-	if err != nil {
-		return nil, errors.New(fmt.Sprintf("error:%v , couldn't open a NETLink socket in namespace %v", err, netns))
-	}
-
-	// Insert in manager cache
-	m.netlinkCache[netlinkCacheKey{Ifindex: ifindex, Netns: netns}] = &cacheEntry
-	return &cacheEntry, nil
 }

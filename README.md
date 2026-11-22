@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="./images/ebpfmanager-logo.svg" alt="ebpfmanager logo" width="180" />
+</p>
+
 # ebpfmanager
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/gojue/ebpfmanager.svg)](https://pkg.go.dev/github.com/gojue/ebpfmanager)
